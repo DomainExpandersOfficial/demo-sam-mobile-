@@ -256,6 +256,10 @@ class ApiService {
   async importJson(json: string): Promise<boolean> {
     return localDb.importAllData(json);
   }
+
+  async resetToDefaults(): Promise<void> {
+    return localDb.resetToDefaults();
+  }
 }
 
 export const api = new ApiService();

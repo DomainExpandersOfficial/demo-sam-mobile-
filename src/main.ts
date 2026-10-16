@@ -8,18 +8,25 @@ import {
   Invoice,
   PaymentRecord,
   TrackingPoint,
-  DashboardMetrics
+  DashboardMetrics,
+  InvoiceItem
 } from './types';
 
-// State
+// Global state
 let currentView = 'dashboard';
 let currentDateFilter = 'Today 11 Oct 2026';
+let currentAttFilter = 'all';
+let currentTrackingTileMode: 'osm' | 'sat' = 'osm';
 let cachedStaff: Staff[] = [];
 let cachedParties: CustomerParty[] = [];
-let activeMap: L.Map | null = null;
-let activePolyline: L.Polyline | null = null;
+let cachedTracking: TrackingPoint[] = [];
 
-// DOM references
+let activeMap: L.Map | null = null;
+let activeTileLayer: L.TileLayer | null = null;
+let activePolyline: L.Polyline | null = null;
+let mapMarkers: L.Marker[] = [];
+
+// DOM References
 const viewContent = document.getElementById('view-content') as HTMLElement;
 const modalContainer = document.getElementById('modal-container') as HTMLElement;
 const modalTitle = document.getElementById('modal-title') as HTMLElement;
@@ -31,7 +38,7 @@ const searchResultsDropdown = document.getElementById('search-results-dropdown')
 const notificationsBellBtn = document.getElementById('notifications-bell-btn') as HTMLElement;
 const notificationsPopover = document.getElementById('notifications-popover') as HTMLElement;
 
-// Toast notification
+// Notification helper
 function showToast(message: string, icon = '✅') {
   const toast = document.createElement('div');
   toast.className = 'toast';
@@ -55,8 +62,8 @@ function closeModal() {
   modalBody.innerHTML = '';
 }
 
-modalCloseBtn.addEventListener('click', closeModal);
-modalContainer.addEventListener('click', (e) => {
+modalCloseBtn?.addEventListener('click', closeModal);
+modalContainer?.addEventListener('click', (e) => {
   if (e.target === modalContainer) closeModal();
 });
 
@@ -70,6 +77,9 @@ function switchView(viewName: string) {
   if (activeMap) {
     activeMap.remove();
     activeMap = null;
+    activeTileLayer = null;
+    activePolyline = null;
+    mapMarkers = [];
   }
   document.querySelectorAll('.nav-item').forEach(el => {
     el.classList.toggle('active', el.getAttribute('data-view') === viewName);
@@ -78,10 +88,16 @@ function switchView(viewName: string) {
 }
 
 async function renderActiveView() {
-  viewContent.innerHTML = `<div style="text-align:center; padding: 60px 0;"><p style="color: #64748b;">Loading operations data...</p></div>`;
+  viewContent.innerHTML = `
+    <div style="text-align:center; padding: 60px 0;">
+      <div style="font-size: 1.5rem; margin-bottom: 8px;">⏳</div>
+      <p style="color: #64748b; font-size: 0.9rem;">Loading SAM MOBILE ERP data...</p>
+    </div>
+  `;
 
   cachedStaff = await api.getStaff();
   cachedParties = await api.getParties();
+  cachedTracking = await api.getTrackingPoints();
 
   switch (currentView) {
     case 'dashboard':
@@ -119,19 +135,27 @@ async function renderActiveView() {
   }
 }
 
-// 1. DASHBOARD VIEW (With Exact Top Section & 8 Preview Tiles from Screenshot)
+// ============================================================================
+// 1. DASHBOARD VIEW
+// ============================================================================
 async function renderDashboard() {
   const metrics = await api.getMetrics();
   const attendance = await api.getAttendance();
   const parties = await api.getParties();
   const tracking = await api.getTrackingPoints();
+  const visits = await api.getStoreVisits();
+  const payments = await api.getPayments();
+  const invoices = await api.getInvoices();
+
+  const presentCount = attendance.filter(a => a.status === 'present').length;
+  const absentCount = attendance.filter(a => a.status === 'absent').length;
 
   viewContent.innerHTML = `
     <!-- Dashboard Header -->
     <div class="dash-header-row">
       <div>
         <h1 class="dash-title">Dashboard</h1>
-        <p class="dash-subtitle">Complete overview of your field operations and collections</p>
+        <p class="dash-subtitle">Noida & NCR Field Operations, Handset Distribution & Collections</p>
       </div>
       <div class="date-pill-btn" id="date-pill-toggle">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
@@ -148,7 +172,7 @@ async function renderDashboard() {
       </div>
     </div>
 
-    <!-- 5 KPI Cards (Exact match to screenshot) -->
+    <!-- 5 KPI Cards -->
     <div class="kpi-row-5">
       <!-- 1. Total Employees -->
       <div class="kpi-card-white" onclick="window.switchView('attendance')">
@@ -158,10 +182,10 @@ async function renderDashboard() {
           </div>
           <span class="kpi-growth-pill positive">↑ 12%</span>
         </div>
-        <div class="kpi-num">24</div>
+        <div class="kpi-num">${cachedStaff.length || 24}</div>
         <div class="kpi-label">Total Employees</div>
         <div class="kpi-footer-sub">
-          <strong style="color: #059669;">20 Present</strong> • <span style="color: #dc2626;">4 Absent</span>
+          <strong style="color: #059669;">${presentCount} Present</strong> • <span style="color: #dc2626;">${absentCount} Absent</span>
         </div>
       </div>
 
@@ -173,10 +197,10 @@ async function renderDashboard() {
           </div>
           <span class="kpi-growth-pill positive">↑ 18%</span>
         </div>
-        <div class="kpi-num">86</div>
+        <div class="kpi-num">${visits.length || 86}</div>
         <div class="kpi-label">Store Visits</div>
         <div class="kpi-footer-sub">
-          Today: <strong>28</strong> • Yesterday: <strong>24</strong>
+          Verified: <strong style="color: #2563eb;">${visits.filter(v => v.isVerified).length}</strong> • Pending: <strong>${visits.filter(v => !v.isVerified).length}</strong>
         </div>
       </div>
 
@@ -191,7 +215,7 @@ async function renderDashboard() {
         <div class="kpi-num">${formatCurrency(metrics.todayTotalCollection)}</div>
         <div class="kpi-label">Total Collection</div>
         <div class="kpi-footer-sub">
-          UPI: <strong>₹ 3,18,000</strong> • Cash: <strong>₹ 2,24,800</strong>
+          UPI: <strong>${formatCurrency(metrics.todayUpiCollection)}</strong> • Cash: <strong>${formatCurrency(metrics.todayCashCollection)}</strong>
         </div>
       </div>
 
@@ -201,12 +225,12 @@ async function renderDashboard() {
           <div class="kpi-icon-box" style="background: #fef2f2; color: #ef4444;">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2" ry="2"></rect><line x1="1" y1="10" x2="23" y2="10"></line></svg>
           </div>
-          <span class="kpi-growth-pill negative">↑ 6%</span>
+          <span class="kpi-growth-pill negative">Due</span>
         </div>
         <div class="kpi-num" style="color: #ef4444;">${formatCurrency(metrics.totalMarketOutstanding)}</div>
         <div class="kpi-label">Pending Payments</div>
         <div class="kpi-footer-sub">
-          <span style="color: #ef4444; font-weight: 600;">42 Parties Overdue</span>
+          <span style="color: #ef4444; font-weight: 600;">${parties.filter(p => p.currentBalance > 0).length} Retailers Overdue</span>
         </div>
       </div>
 
@@ -218,9 +242,9 @@ async function renderDashboard() {
           </div>
           <span class="kpi-growth-pill positive">↑ 14%</span>
         </div>
-        <div class="kpi-num">156</div>
+        <div class="kpi-num">${invoices.length || 156}</div>
         <div class="kpi-label">Total Invoices</div>
-        <div class="kpi-footer-sub">This Month</div>
+        <div class="kpi-footer-sub">Handset Billing Active</div>
       </div>
     </div>
 
@@ -245,7 +269,7 @@ async function renderDashboard() {
           </thead>
           <tbody>
             ${attendance.slice(0, 5).map((att, idx) => {
-              const visitsCount = [5, 4, 0, 6, 3][idx] || 2;
+              const visitsCount = [5, 4, 0, 6, 3, 2][idx] || 2;
               return `
                 <tr>
                   <td>
@@ -269,24 +293,24 @@ async function renderDashboard() {
         </table>
       </div>
 
-      <!-- Live Tracking Map Card (With Real Leaflet OpenStreetMap) -->
+      <!-- Live Tracking Map Card -->
       <div class="card-white" style="position: relative;">
         <div class="card-header-flex">
-          <span class="card-title-text">Live Employee Tracking</span>
+          <span class="card-title-text">Live Employee Tracking (Noida / NCR)</span>
           <a class="card-view-all" onclick="window.switchView('tracking')">View Full Map →</a>
         </div>
 
-        <div id="live-tracking-map"></div>
+        <div id="live-tracking-map" style="height: 320px; width: 100%; border-radius: 8px;"></div>
 
         <div class="map-card-popup" id="active-map-card">
           <div class="map-popup-header">
-            <span class="map-popup-name">Rohit Kumar</span>
+            <span class="map-popup-name" id="popup-agent-name">Rohit Kumar</span>
             <span class="status-pill status-present" style="font-size: 0.65rem;">On Duty</span>
           </div>
-          <div class="map-popup-sub">
-            MP Nagar, Bhopal<br>Last updated: 10:24 AM
+          <div class="map-popup-sub" id="popup-agent-sub">
+            Sector 18, Atta Market, Noida<br>Last updated: 10:24 AM
           </div>
-          <a class="map-popup-link" onclick="window.focusOnEmployee('Rohit Kumar', 23.2332, 77.4343)">View Details →</a>
+          <a class="map-popup-link" onclick="window.focusOnEmployee('Rohit Kumar', 28.5708, 77.3271, 'Sector 18, Atta Market, Noida')">View Details →</a>
         </div>
       </div>
     </div>
@@ -296,51 +320,50 @@ async function renderDashboard() {
       <!-- Recent Activities -->
       <div class="card-white">
         <div class="card-header-flex">
-          <span class="card-title-text">Recent Activities</span>
-          <a class="card-view-all">View All →</a>
+          <span class="card-title-text">Recent Operations Feed</span>
+          <a class="card-view-all">Live Pings</a>
         </div>
 
         <div class="activity-feed-list">
-          <div class="activity-item">
-            <div class="activity-icon" style="background: #eff6ff; color: #2563eb;">📍</div>
-            <div class="activity-body">
-              <div class="activity-title">Rohit Kumar submitted store visit at MP Nagar</div>
-              <div class="activity-time">12 mins ago</div>
+          ${visits.slice(0, 2).map(v => `
+            <div class="activity-item">
+              <div class="activity-icon" style="background: #eff6ff; color: #2563eb;">📍</div>
+              <div class="activity-body">
+                <div class="activity-title">${v.staffName} submitted visit at <strong>${v.storeName}</strong></div>
+                <div class="activity-time">${v.visitTime} • ${v.address}</div>
+              </div>
             </div>
-          </div>
-          <div class="activity-item">
-            <div class="activity-icon" style="background: #ecfdf5; color: #10b981;">💰</div>
-            <div class="activity-body">
-              <div class="activity-title">Payment received from Sharma Traders ₹ 25,000 (UPI)</div>
-              <div class="activity-time">45 mins ago</div>
+          `).join('')}
+          ${payments.slice(0, 2).map(p => `
+            <div class="activity-item">
+              <div class="activity-icon" style="background: #ecfdf5; color: #10b981;">💰</div>
+              <div class="activity-body">
+                <div class="activity-title">Payment received from <strong>${p.shopName}</strong>: ${formatCurrency(p.amount)} (${p.paymentMode})</div>
+                <div class="activity-time">${p.date} • Ref: ${p.transactionRef}</div>
+              </div>
             </div>
-          </div>
-          <div class="activity-item">
-            <div class="activity-icon" style="background: #eff6ff; color: #6366f1;">🧾</div>
-            <div class="activity-body">
-              <div class="activity-title">Invoice #INV-2026-0156 created for Sharma Traders</div>
-              <div class="activity-time">1 hour ago</div>
+          `).join('')}
+          ${invoices.slice(0, 1).map(inv => `
+            <div class="activity-item">
+              <div class="activity-icon" style="background: #eff6ff; color: #6366f1;">🧾</div>
+              <div class="activity-body">
+                <div class="activity-title">Invoice <strong>#${inv.invoiceNumber}</strong> generated for ${inv.shopName}</div>
+                <div class="activity-time">${inv.date} • Total: ${formatCurrency(inv.totalAmount)}</div>
+              </div>
             </div>
-          </div>
-          <div class="activity-item">
-            <div class="activity-icon" style="background: #fef2f2; color: #ef4444;">⏰</div>
-            <div class="activity-body">
-              <div class="activity-title">Payment overdue alert - Jain Electronics ₹ 1,20,000</div>
-              <div class="activity-time">2 hours ago</div>
-            </div>
-          </div>
+          `).join('')}
         </div>
       </div>
 
-      <!-- Pending Payments List -->
+      <!-- Pending Payments List with 1-Click WhatsApp -->
       <div class="card-white">
         <div class="card-header-flex">
-          <span class="card-title-text">Pending Payments</span>
+          <span class="card-title-text">Pending Retailer Ledger</span>
           <a class="card-view-all" onclick="window.switchView('parties')">View All →</a>
         </div>
 
         <div class="pending-pay-list">
-          ${parties.slice(0, 5).map(p => `
+          ${parties.filter(p => p.currentBalance > 0).slice(0, 5).map(p => `
             <div class="pending-pay-item">
               <div>
                 <div class="pending-store-name">${p.shopName}</div>
@@ -350,7 +373,7 @@ async function renderDashboard() {
                 <span class="status-pill ${p.duePaymentDate?.includes('overdue') ? 'status-overdue' : 'status-due-soon'}">
                   ${p.duePaymentDate || 'Due Soon'}
                 </span>
-                <button class="btn btn-whatsapp" style="padding: 4px 8px; font-size: 0.7rem;" onclick="window.sendWhatsAppReminder('${p.phone}', '${p.name}', '${p.shopName}', ${p.currentBalance}, '${p.duePaymentDate || 'Due date'}')">
+                <button class="btn btn-whatsapp" style="padding: 4px 8px; font-size: 0.72rem;" onclick="window.sendWhatsAppReminder('${p.phone}', '${p.name}', '${p.shopName}', ${p.currentBalance}, '${p.duePaymentDate || 'Due date'}')">
                   📲 Remind
                 </button>
               </div>
@@ -360,7 +383,7 @@ async function renderDashboard() {
       </div>
     </div>
 
-    <!-- 8 Modules Visual Navigation Grid (Matching the Full Screenshot Structure) -->
+    <!-- 8 Modules Visual Navigation Grid -->
     <div class="modules-preview-section">
       <div class="modules-preview-header">
         <div>
@@ -370,7 +393,6 @@ async function renderDashboard() {
       </div>
 
       <div class="modules-grid-8">
-        <!-- 1. Attendance Management -->
         <div class="module-preview-card" onclick="window.switchView('attendance')">
           <div>
             <span class="module-badge">1. Web View</span>
@@ -380,7 +402,6 @@ async function renderDashboard() {
           <div class="module-action-link">Open Attendance →</div>
         </div>
 
-        <!-- 2. Employee Tracking -->
         <div class="module-preview-card" onclick="window.switchView('tracking')">
           <div>
             <span class="module-badge">2. Web View</span>
@@ -390,7 +411,6 @@ async function renderDashboard() {
           <div class="module-action-link">Open Live Map →</div>
         </div>
 
-        <!-- 3. Store Visit Submission -->
         <div class="module-preview-card" onclick="window.switchView('visits')">
           <div>
             <span class="module-badge">3. Mobile / Web</span>
@@ -400,7 +420,6 @@ async function renderDashboard() {
           <div class="module-action-link">Open Store Check-in →</div>
         </div>
 
-        <!-- 4. Party / Customer Management -->
         <div class="module-preview-card" onclick="window.switchView('parties')">
           <div>
             <span class="module-badge">4. Web View</span>
@@ -410,7 +429,6 @@ async function renderDashboard() {
           <div class="module-action-link">Open Customer CRM →</div>
         </div>
 
-        <!-- 5. Invoice Creation -->
         <div class="module-preview-card" onclick="window.switchView('invoices')">
           <div>
             <span class="module-badge">5. Web View</span>
@@ -420,7 +438,6 @@ async function renderDashboard() {
           <div class="module-action-link">Create Invoice →</div>
         </div>
 
-        <!-- 6. Invoice Preview -->
         <div class="module-preview-card" onclick="window.previewInvoice('INV-2026-0156')">
           <div>
             <span class="module-badge">6. Web View</span>
@@ -430,7 +447,6 @@ async function renderDashboard() {
           <div class="module-action-link">Preview Sample Bill →</div>
         </div>
 
-        <!-- 7. Collection & Payment Tracking -->
         <div class="module-preview-card" onclick="window.switchView('collections')">
           <div>
             <span class="module-badge">7. Web View</span>
@@ -440,7 +456,6 @@ async function renderDashboard() {
           <div class="module-action-link">Open Collections →</div>
         </div>
 
-        <!-- 8. Mobile App Screens -->
         <div class="module-preview-card" onclick="window.switchView('mobile_screens')" style="background: linear-gradient(135deg, #ffffff, #eff6ff); border-color: #93c5fd;">
           <div>
             <span class="module-badge" style="background: #2563eb; color: white;">8. Mobile Simulator</span>
@@ -462,14 +477,15 @@ async function renderDashboard() {
   });
 
   document.querySelectorAll('.date-dropdown-item').forEach(item => {
-    item.addEventListener('click', (e) => {
+    item.addEventListener('click', async (e) => {
       e.stopPropagation();
       const val = (item as HTMLElement).getAttribute('data-date') || 'Today 11 Oct 2026';
       currentDateFilter = val;
       const label = document.getElementById('active-date-label');
       if (label) label.textContent = val;
       dateMenu?.classList.add('hidden');
-      showToast(`Filtered data for ${val}`, '📅');
+      showToast(`Showing operations for ${val}`, '📅');
+      await renderDashboard();
     });
   });
 
@@ -477,116 +493,157 @@ async function renderDashboard() {
     dateMenu?.classList.add('hidden');
   });
 
-  // Initialize Leaflet Map
+  // Initialize Map on Dashboard
   setTimeout(() => {
     initLeafletMap('live-tracking-map', tracking);
   }, 100);
 }
 
-// Interactive Leaflet OpenStreetMap helper with Polyline routes
+// Leaflet OpenStreetMap helper (Noida / NCR Hub)
 function initLeafletMap(containerId: string, trackingPoints: TrackingPoint[]) {
   const container = document.getElementById(containerId);
   if (!container) return;
 
-  const centerLat = 23.2332;
-  const centerLng = 77.4343;
+  // Clean previous instance
+  if (activeMap) {
+    activeMap.remove();
+    activeMap = null;
+  }
+
+  // Noida Sector 18 Central Hub
+  const centerLat = 28.5708;
+  const centerLng = 77.3271;
 
   activeMap = L.map(containerId, {
     zoomControl: true,
     attributionControl: false
-  }).setView([centerLat, centerLng], 13);
+  }).setView([centerLat, centerLng], 12);
 
-  // OpenStreetMap standard clean tiles
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  // Map Tile Layers
+  const osmUrl = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+  const satUrl = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+
+  activeTileLayer = L.tileLayer(currentTrackingTileMode === 'sat' ? satUrl : osmUrl, {
     maxZoom: 19
   }).addTo(activeMap);
 
-  // Add custom avatar markers with tooltips
-  trackingPoints.forEach(t => {
+  mapMarkers = [];
+
+  // Add agent markers with avatar icons
+  trackingPoints.forEach((t) => {
     const customIcon = L.divIcon({
       className: 'custom-map-avatar-marker',
       html: `
-        <div style="width: 34px; height: 34px; border-radius: 50%; border: 3px solid #2563eb; background: #ffffff; overflow: hidden; box-shadow: 0 4px 10px rgba(0,0,0,0.3); cursor: pointer;">
+        <div style="width: 36px; height: 36px; border-radius: 50%; border: 3px solid #2563eb; background: #ffffff; overflow: hidden; box-shadow: 0 4px 10px rgba(0,0,0,0.3); cursor: pointer; position: relative;">
           <img src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=60" style="width: 100%; height: 100%; object-fit: cover;">
+          <span style="position: absolute; bottom: 0; right: 0; width: 10px; height: 10px; border-radius: 50%; background: #10b981; border: 2px solid white;"></span>
         </div>
       `,
-      iconSize: [34, 34],
-      iconAnchor: [17, 17]
+      iconSize: [36, 36],
+      iconAnchor: [18, 18]
     });
 
     const marker = L.marker([t.latitude, t.longitude], { icon: customIcon }).addTo(activeMap!);
+    marker.bindPopup(`
+      <div style="font-family: var(--font-family); padding: 4px;">
+        <strong style="font-size: 0.9rem; color: #0f172a;">${t.staffName}</strong>
+        <div style="font-size: 0.75rem; color: #059669; font-weight: 600; margin: 2px 0;">● On Duty (${t.batteryLevel}% Battery)</div>
+        <div style="font-size: 0.78rem; color: #64748b;">📍 ${t.address}</div>
+        <div style="font-size: 0.72rem; color: #94a3b8; margin-top: 4px;">Last Ping: ${t.timestamp}</div>
+      </div>
+    `);
+
     marker.on('click', () => {
-      (window as any).focusOnEmployee(t.staffName, t.latitude, t.longitude);
+      (window as any).focusOnEmployee(t.staffName, t.latitude, t.longitude, t.address);
     });
+
+    mapMarkers.push(marker);
   });
 
-  // Draw simulated route polyline
+  // Noida Route Polyline connecting Sector 15 -> Sector 18 -> Sector 29 -> Sector 62
   const routeCoords: [number, number][] = [
-    [23.2150, 77.4300], // Arera Colony
-    [23.2200, 77.4000], // TT Nagar
-    [23.2332, 77.4343], // MP Nagar
-    [23.2680, 77.4650]  // Ayodhya Bypass
+    [28.5835, 77.3150], // Sector 15
+    [28.5708, 77.3271], // Sector 18 Atta Market
+    [28.5645, 77.3340], // Sector 29 / Botanical Garden
+    [28.6280, 77.3649]  // Sector 62 Electronic City
   ];
-  activePolyline = L.polyline(routeCoords, { color: '#2563eb', weight: 4, dashArray: '6, 8', opacity: 0.8 }).addTo(activeMap);
+  activePolyline = L.polyline(routeCoords, { color: '#2563eb', weight: 4, dashArray: '6, 8', opacity: 0.85 }).addTo(activeMap);
+
+  setTimeout(() => {
+    activeMap?.invalidateSize();
+  }, 200);
 }
 
-// 2. ATTENDANCE MANAGEMENT (Web view matching bottom screen 1)
+// ============================================================================
+// 2. ATTENDANCE MANAGEMENT
+// ============================================================================
 async function renderAttendance() {
-  const records = await api.getAttendance();
+  const records = await api.getAttendance(currentAttFilter);
+  const allRecords = await api.getAttendance('all');
+
+  const presentCount = allRecords.filter(r => r.status === 'present').length;
+  const absentCount = allRecords.filter(r => r.status === 'absent').length;
+  const lateCount = allRecords.filter(r => r.punchInTime > '09:15 AM' && r.status === 'present').length;
+  const halfDayCount = allRecords.filter(r => r.status === 'half_day').length;
 
   viewContent.innerHTML = `
     <div class="dash-header-row">
       <div>
         <h1 class="dash-title">Attendance</h1>
-        <p class="dash-subtitle">Track employee attendance and working hours</p>
+        <p class="dash-subtitle">Track employee attendance, working hours, and field punch records</p>
       </div>
       <div style="display: flex; gap: 10px;">
-        <button class="btn btn-secondary">Oct 2026 📅</button>
+        <button class="btn btn-secondary" id="btn-att-month-label">Oct 2026 📅</button>
         <button class="btn btn-primary" id="btn-quick-punch">⏱️ Punch In/Out</button>
       </div>
     </div>
 
-    <!-- Filter & Summary Pills (Matching screenshot) -->
+    <!-- Filter & Summary Pills -->
     <div class="card-white" style="margin-bottom: 20px;">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
         <div style="display: flex; gap: 8px;">
-          <button class="btn btn-primary btn-sm filter-att-btn active" data-filter="all">Today</button>
-          <button class="btn btn-secondary btn-sm filter-att-btn" data-filter="week">This Week</button>
-          <button class="btn btn-secondary btn-sm filter-att-btn" data-filter="month">This Month</button>
-          <button class="btn btn-secondary btn-sm filter-att-btn" data-filter="custom">Custom</button>
+          <button class="btn ${currentAttFilter === 'all' ? 'btn-primary' : 'btn-secondary'} btn-sm filter-att-btn" data-filter="all">Today</button>
+          <button class="btn ${currentAttFilter === 'present' ? 'btn-primary' : 'btn-secondary'} btn-sm filter-att-btn" data-filter="present">Present Only</button>
+          <button class="btn ${currentAttFilter === 'absent' ? 'btn-primary' : 'btn-secondary'} btn-sm filter-att-btn" data-filter="absent">Absent</button>
+          <button class="btn ${currentAttFilter === 'late' ? 'btn-primary' : 'btn-secondary'} btn-sm filter-att-btn" data-filter="late">Late</button>
         </div>
-        <button class="btn btn-secondary btn-sm" onclick="window.exportAttendanceCSV()">📥 Export</button>
+        <button class="btn btn-secondary btn-sm" onclick="window.exportAttendanceCSV()">📥 Export CSV</button>
       </div>
 
       <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px;">
-        <div style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid var(--border-light);">
+        <div style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid var(--border-light); cursor: pointer;" onclick="window.setAttendanceFilter('present')">
           <span style="font-size: 0.75rem; color: #64748b;">🟢 Present</span>
-          <div style="font-size: 1.4rem; font-weight: 800; color: #059669;">20</div>
+          <div style="font-size: 1.4rem; font-weight: 800; color: #059669;">${presentCount}</div>
         </div>
-        <div style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid var(--border-light);">
+        <div style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid var(--border-light); cursor: pointer;" onclick="window.setAttendanceFilter('absent')">
           <span style="font-size: 0.75rem; color: #64748b;">🔴 Absent</span>
-          <div style="font-size: 1.4rem; font-weight: 800; color: #dc2626;">4</div>
+          <div style="font-size: 1.4rem; font-weight: 800; color: #dc2626;">${absentCount}</div>
         </div>
-        <div style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid var(--border-light);">
+        <div style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid var(--border-light); cursor: pointer;" onclick="window.setAttendanceFilter('late')">
           <span style="font-size: 0.75rem; color: #64748b;">🟡 Late</span>
-          <div style="font-size: 1.4rem; font-weight: 800; color: #d97706;">3</div>
+          <div style="font-size: 1.4rem; font-weight: 800; color: #d97706;">${lateCount}</div>
         </div>
-        <div style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid var(--border-light);">
+        <div style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid var(--border-light); cursor: pointer;" onclick="window.setAttendanceFilter('half_day')">
           <span style="font-size: 0.75rem; color: #64748b;">🔵 Half Day</span>
-          <div style="font-size: 1.4rem; font-weight: 800; color: #2563eb;">2</div>
+          <div style="font-size: 1.4rem; font-weight: 800; color: #2563eb;">${halfDayCount}</div>
         </div>
       </div>
     </div>
 
     <!-- Attendance Table -->
     <div class="card-white">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+        <h4 style="font-size: 1rem; color: #0f172a;">Attendance Register (${records.length} records)</h4>
+        <span style="font-size: 0.78rem; color: #64748b;">Showing: <strong>${currentAttFilter.toUpperCase()}</strong></span>
+      </div>
+
       <table class="clean-table">
         <thead>
           <tr>
             <th>Employee</th>
             <th>Check-in</th>
             <th>Check-out</th>
-            <th>Total Hours</th>
+            <th>Location (Noida)</th>
             <th>Status</th>
             <th>Action</th>
           </tr>
@@ -597,18 +654,23 @@ async function renderAttendance() {
               <td>
                 <div class="emp-cell">
                   <img src="${r.photoUrl || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100'}" class="emp-avatar">
-                  <strong>${r.staffName}</strong>
+                  <div>
+                    <strong>${r.staffName}</strong>
+                    <div style="font-size: 0.7rem; color: #64748b;">ID: ${r.staffId}</div>
+                  </div>
                 </div>
               </td>
               <td>${r.punchInTime}</td>
               <td>${r.punchOutTime || '--'}</td>
-              <td>${r.punchOutTime ? '8h 4m' : '--'}</td>
+              <td><span style="color: #475569;">📍 ${r.punchInLocation}</span></td>
               <td>
-                <span class="status-pill ${r.status === 'present' ? 'status-present' : 'status-absent'}">
-                  ${r.status === 'present' ? 'Present' : 'Absent'}
+                <span class="status-pill ${r.status === 'present' ? 'status-present' : (r.status === 'half_day' ? 'status-late' : 'status-absent')}">
+                  ${r.status === 'present' ? 'Present' : (r.status === 'half_day' ? 'Half Day' : 'Absent')}
                 </span>
               </td>
-              <td><a class="card-view-all" onclick="window.viewEmployeeAttendanceDetail('${r.staffName}', '${r.punchInTime}', '${r.punchInLocation}')">View</a></td>
+              <td>
+                <button class="btn btn-secondary btn-sm" onclick="window.viewEmployeeAttendanceDetail('${r.staffName}', '${r.punchInTime}', '${r.punchInLocation}', '${r.status}')">View</button>
+              </td>
             </tr>
           `).join('')}
         </tbody>
@@ -616,10 +678,25 @@ async function renderAttendance() {
     </div>
   `;
 
+  // Attach filter events
+  document.querySelectorAll('.filter-att-btn').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const f = (e.currentTarget as HTMLElement).getAttribute('data-filter') || 'all';
+      (window as any).setAttendanceFilter(f);
+    });
+  });
+
   document.getElementById('btn-quick-punch')?.addEventListener('click', openQuickPunchModal);
 }
 
-// 3. EMPLOYEE TRACKING (Web view matching bottom screen 2)
+(window as any).setAttendanceFilter = async (f: string) => {
+  currentAttFilter = f;
+  await renderAttendance();
+};
+
+// ============================================================================
+// 3. EMPLOYEE TRACKING VIEW
+// ============================================================================
 async function renderTracking() {
   const tracking = await api.getTrackingPoints();
   const staff = cachedStaff;
@@ -627,44 +704,47 @@ async function renderTracking() {
   viewContent.innerHTML = `
     <div class="dash-header-row">
       <div>
-        <h1 class="dash-title">Employee Tracking</h1>
-        <p class="dash-subtitle">Live GPS location of all on-duty field sales agents</p>
+        <h1 class="dash-title">Employee Tracking (Noida / NCR)</h1>
+        <p class="dash-subtitle">Live GPS location and field agent route monitoring across Sector 18, 62, 15, and 29</p>
       </div>
       <div style="display: flex; gap: 8px;">
-        <button class="btn btn-secondary btn-sm active" id="btn-map-view-toggle">Map</button>
-        <button class="btn btn-secondary btn-sm" onclick="showToast('Satellite view loaded successfully!')">Satellite</button>
+        <button class="btn ${currentTrackingTileMode === 'osm' ? 'btn-primary' : 'btn-secondary'} btn-sm" id="btn-mode-map">Map View</button>
+        <button class="btn ${currentTrackingTileMode === 'sat' ? 'btn-primary' : 'btn-secondary'} btn-sm" id="btn-mode-sat">Satellite View</button>
       </div>
     </div>
 
     <div style="display: grid; grid-template-columns: 2.2fr 1fr; gap: 18px;">
-      <div class="card-white" style="padding: 0; overflow: hidden; height: 550px;">
+      <div class="card-white" style="padding: 0; overflow: hidden; height: 560px;">
         <div id="full-tracking-map" style="width: 100%; height: 100%;"></div>
       </div>
 
-      <div class="card-white" style="height: 550px; display: flex; flex-direction: column;">
+      <div class="card-white" style="height: 560px; display: flex; flex-direction: column;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-          <h4 style="font-size: 0.95rem;">All Employees (${staff.length})</h4>
-          <span style="font-size: 0.72rem; color: #2563eb; font-weight: 600;">All Status ▼</span>
+          <h4 style="font-size: 0.95rem;">All Field Agents (${staff.length})</h4>
+          <span style="font-size: 0.72rem; color: #2563eb; font-weight: 600;">Active Live Pings ●</span>
         </div>
 
-        <input type="text" id="tracking-search" class="form-input" placeholder="Search employee..." style="margin-bottom: 12px;">
+        <input type="text" id="tracking-search" class="form-input" placeholder="Search agent name or Sector..." style="margin-bottom: 12px;">
 
         <div style="overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 8px;" id="tracking-emp-list">
-          ${staff.map(s => `
-            <div style="padding: 10px; border-radius: 8px; border: 1px solid var(--border-light); background: #f8fafc; display: flex; justify-content: space-between; align-items: center; cursor: pointer;" onclick="window.focusOnEmployee('${s.name}', 23.2332, 77.4343)">
-              <div style="display: flex; gap: 10px; align-items: center;">
-                <img src="${s.avatar}" style="width: 32px; height: 32px; border-radius: 50%; object-fit: cover;">
-                <div>
-                  <div style="font-size: 0.82rem; font-weight: 600;">${s.name}</div>
-                  <div style="font-size: 0.72rem; color: #64748b;">MP Nagar, Bhopal</div>
+          ${staff.map((s, idx) => {
+            const trk = tracking[idx] || tracking[0];
+            return `
+              <div class="tracking-item-card" style="padding: 10px; border-radius: 8px; border: 1px solid var(--border-light); background: #f8fafc; display: flex; justify-content: space-between; align-items: center; cursor: pointer;" onclick="window.focusOnEmployee('${s.name}', ${trk.latitude}, ${trk.longitude}, '${trk.address}')">
+                <div style="display: flex; gap: 10px; align-items: center;">
+                  <img src="${s.avatar}" style="width: 34px; height: 34px; border-radius: 50%; object-fit: cover;">
+                  <div>
+                    <div style="font-size: 0.82rem; font-weight: 600;">${s.name}</div>
+                    <div style="font-size: 0.72rem; color: #64748b;">📍 ${trk.address}</div>
+                  </div>
+                </div>
+                <div style="text-align: right;">
+                  <span class="status-pill status-present" style="font-size: 0.65rem;">On Duty</span>
+                  <div style="font-size: 0.68rem; color: #94a3b8; margin-top: 2px;">🔋 ${trk.batteryLevel}%</div>
                 </div>
               </div>
-              <div style="text-align: right;">
-                <span class="status-pill status-present" style="font-size: 0.65rem;">On Duty</span>
-                <div style="font-size: 0.68rem; color: #94a3b8; margin-top: 2px;">10:24 AM</div>
-              </div>
-            </div>
-          `).join('')}
+            `;
+          }).join('')}
         </div>
       </div>
     </div>
@@ -673,6 +753,16 @@ async function renderTracking() {
   setTimeout(() => {
     initLeafletMap('full-tracking-map', tracking);
   }, 100);
+
+  // Map Tile Toggle
+  document.getElementById('btn-mode-map')?.addEventListener('click', () => {
+    currentTrackingTileMode = 'osm';
+    renderTracking();
+  });
+  document.getElementById('btn-mode-sat')?.addEventListener('click', () => {
+    currentTrackingTileMode = 'sat';
+    renderTracking();
+  });
 
   // Filter staff list
   document.getElementById('tracking-search')?.addEventListener('input', (e) => {
@@ -684,7 +774,9 @@ async function renderTracking() {
   });
 }
 
-// 4. STORE VISITS (Matching bottom screen 3)
+// ============================================================================
+// 4. STORE VISITS VIEW
+// ============================================================================
 async function renderStoreVisits() {
   const visits = await api.getStoreVisits();
   const parties = cachedParties;
@@ -693,46 +785,51 @@ async function renderStoreVisits() {
     <div class="dash-header-row">
       <div>
         <h1 class="dash-title">Store Visits</h1>
-        <p class="dash-subtitle">Submission of store and location with photos and verification check</p>
+        <p class="dash-subtitle">Submission of store visit, location, camera photo check, and verification status</p>
       </div>
-      <button class="btn btn-primary" id="btn-submit-visit-modal">📸 New Store Visit</button>
+      <button class="btn btn-primary" onclick="document.getElementById('v-store-select').focus()">📸 New Store Visit</button>
     </div>
 
     <div style="display: grid; grid-template-columns: 1fr 1.6fr; gap: 20px;">
-      <!-- Store Visit Form (Matches mobile screen 3 in screenshot) -->
+      <!-- Store Visit Form -->
       <div class="card-white">
-        <h3 style="font-size: 1.1rem; margin-bottom: 14px;">🏪 New Store Visit</h3>
+        <h3 style="font-size: 1.1rem; margin-bottom: 14px;">🏪 New Store Visit Submission</h3>
         
         <form id="store-visit-form">
           <div class="form-group">
-            <label class="form-label">Select Store *</label>
+            <label class="form-label">Select Retailer / Store *</label>
             <select id="v-store-select" class="form-select" required>
-              <option value="Kumar Mobile Point">Kumar Mobile Point</option>
-              ${parties.map(p => `<option value="${p.shopName}">${p.shopName}</option>`).join('')}
+              ${parties.map(p => `<option value="${p.shopName}">${p.shopName} (${p.name})</option>`).join('')}
+              <option value="Kumar Mobile Point">Kumar Mobile Point (Atta Market)</option>
             </select>
           </div>
 
           <div class="form-group">
             <label class="form-label">Location (Auto-captured)</label>
             <div style="display: flex; gap: 8px;">
-              <input type="text" id="v-location" class="form-input" value="MP Nagar, Bhopal (Auto-captured)">
-              <button type="button" class="btn btn-secondary btn-sm" id="btn-change-gps">Change</button>
+              <input type="text" id="v-location" class="form-input" value="Atta Market, Sector 18, Noida (Auto-captured)">
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-change-gps">Get GPS</button>
             </div>
           </div>
 
           <div class="form-group">
-            <label class="form-label">Photos (Required) *</label>
-            <div style="display: flex; gap: 8px; margin-bottom: 8px;" id="photos-thumbnail-row">
-              <img src="https://images.unsplash.com/photo-1555421689-d68471e189f2?w=150" style="width: 60px; height: 60px; border-radius: 8px; object-fit: cover; border: 1px solid var(--border-light);">
-              <img src="https://images.unsplash.com/photo-1526738549149-8e07eca6c147?w=150" style="width: 60px; height: 60px; border-radius: 8px; object-fit: cover; border: 1px solid var(--border-light);">
-              <div id="add-photo-trigger" style="width: 60px; height: 60px; border-radius: 8px; border: 2px dashed #cbd5e1; display: flex; align-items: center; justify-content: center; color: #64748b; font-size: 1.5rem; cursor: pointer;">+</div>
+            <label class="form-label">Store Photos (Required) *</label>
+            <div style="display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;" id="photos-thumbnail-row">
+              <img src="https://images.unsplash.com/photo-1555421689-d68471e189f2?w=150" style="width: 60px; height: 60px; border-radius: 8px; object-fit: cover; border: 1px solid var(--border-light);" id="preview-photo-1">
+              <img src="https://images.unsplash.com/photo-1526738549149-8e07eca6c147?w=150" style="width: 60px; height: 60px; border-radius: 8px; object-fit: cover; border: 1px solid var(--border-light);" id="preview-photo-2">
+              <div id="add-photo-trigger" style="width: 60px; height: 60px; border-radius: 8px; border: 2px dashed #cbd5e1; display: flex; align-items: center; justify-content: center; color: #64748b; font-size: 1.5rem; cursor: pointer;" title="Attach photo from file or camera">+</div>
             </div>
             <input type="file" id="real-photo-input" accept="image/*" style="display: none;">
           </div>
 
           <div class="form-group">
-            <label class="form-label">Notes</label>
-            <textarea id="v-notes" class="form-textarea" rows="3" placeholder="Stock checked, good response"></textarea>
+            <label class="form-label">Collection Amount (₹ Optional if payment collected)</label>
+            <input type="number" id="v-collection-amt" class="form-input" placeholder="e.g. 5000">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Meeting Notes & Stock Feedback</label>
+            <textarea id="v-notes" class="form-textarea" rows="3" placeholder="Stock checked, Vivo Y200 demand high, collected ₹5000"></textarea>
           </div>
 
           <button type="submit" class="btn btn-primary" style="width: 100%; padding: 12px; font-size: 0.95rem;">
@@ -741,13 +838,17 @@ async function renderStoreVisits() {
         </form>
       </div>
 
-      <!-- Visits List -->
+      <!-- Visits List with Real Verified Checkbox -->
       <div class="card-white">
-        <h3 style="font-size: 1.05rem; margin-bottom: 14px;">Recent Store Submissions</h3>
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+          <h3 style="font-size: 1.05rem;">Recent Store Submissions (${visits.length})</h3>
+          <span style="font-size: 0.75rem; color: #059669; font-weight: 600;">Click checkbox to verify visit</span>
+        </div>
+
         <table class="clean-table">
           <thead>
             <tr>
-              <th>Verified [✓]</th>
+              <th style="width: 80px;">Verified</th>
               <th>Store</th>
               <th>Location</th>
               <th>Time</th>
@@ -758,11 +859,11 @@ async function renderStoreVisits() {
             ${visits.map(v => `
               <tr>
                 <td>
-                  <input type="checkbox" checked style="width: 18px; height: 18px; accent-color: #2563eb;" onchange="showToast('Visit verified checkbox updated [✓]')">
+                  <input type="checkbox" ${v.isVerified ? 'checked' : ''} style="width: 18px; height: 18px; accent-color: #2563eb; cursor: pointer;" onchange="window.toggleVisitStatus('${v.id}', this.checked)">
                 </td>
                 <td>
                   <strong>${v.storeName}</strong>
-                  <div style="font-size: 0.72rem; color: #64748b;">${v.staffName}</div>
+                  <div style="font-size: 0.72rem; color: #64748b;">by ${v.staffName}</div>
                 </td>
                 <td>${v.address}</td>
                 <td>${v.visitTime}</td>
@@ -778,20 +879,23 @@ async function renderStoreVisits() {
   `;
 
   // Real photo upload
+  let uploadedPhotoUrl = 'https://images.unsplash.com/photo-1555421689-d68471e189f2?w=500';
   const addTrigger = document.getElementById('add-photo-trigger');
   const fileInput = document.getElementById('real-photo-input') as HTMLInputElement;
   addTrigger?.addEventListener('click', () => fileInput?.click());
+
   fileInput?.addEventListener('change', (e) => {
     const file = (e.target as HTMLInputElement).files?.[0];
     if (file) {
       const reader = new FileReader();
       reader.onload = () => {
+        uploadedPhotoUrl = reader.result as string;
         const row = document.getElementById('photos-thumbnail-row');
         const img = document.createElement('img');
-        img.src = reader.result as string;
-        img.style.cssText = 'width: 60px; height: 60px; border-radius: 8px; object-fit: cover; border: 1px solid var(--border-light);';
+        img.src = uploadedPhotoUrl;
+        img.style.cssText = 'width: 60px; height: 60px; border-radius: 8px; object-fit: cover; border: 2px solid #2563eb;';
         row?.insertBefore(img, addTrigger);
-        showToast('Photo attached from camera!', '📸');
+        showToast('Photo attached from device!', '📸');
       };
       reader.readAsDataURL(file);
     }
@@ -802,42 +906,58 @@ async function renderStoreVisits() {
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          (document.getElementById('v-location') as HTMLInputElement).value = `GPS Auto-captured (${pos.coords.latitude.toFixed(4)}, ${pos.coords.longitude.toFixed(4)})`;
-          showToast('Live GPS coordinates captured!', '📍');
+          (document.getElementById('v-location') as HTMLInputElement).value = `Sector 18, Noida GPS (${pos.coords.latitude.toFixed(4)}, ${pos.coords.longitude.toFixed(4)})`;
+          showToast('Live GPS coordinates acquired!', '📍');
         },
         () => {
-          (document.getElementById('v-location') as HTMLInputElement).value = 'MP Nagar, Zone 1, Bhopal (23.2332, 77.4343)';
-          showToast('Location updated to Bhopal Market', '📍');
+          (document.getElementById('v-location') as HTMLInputElement).value = 'Atta Market, Sector 18, Noida (28.5708, 77.3271)';
+          showToast('Location refreshed to Sector 18 Market', '📍');
         }
       );
     }
   });
 
+  // Submit visit
   const form = document.getElementById('store-visit-form') as HTMLFormElement;
   form?.addEventListener('submit', async (e) => {
     e.preventDefault();
+    const storeSelect = document.getElementById('v-store-select') as HTMLSelectElement;
+    const storeName = storeSelect.value;
+    const loc = (document.getElementById('v-location') as HTMLInputElement).value;
+    const notes = (document.getElementById('v-notes') as HTMLTextAreaElement).value;
+    const colAmt = Number((document.getElementById('v-collection-amt') as HTMLInputElement).value) || 0;
+
     const newV: StoreVisit = {
       id: 'VST-' + Date.now(),
       staffId: 'STF-01',
       staffName: 'Rohit Kumar',
-      storeName: (document.getElementById('v-store-select') as HTMLSelectElement).value || 'Kumar Mobile Point',
-      ownerName: 'Sunil Kumar',
+      storeName: storeName,
+      ownerName: 'Retail Partner',
       phone: '0987654321',
-      address: (document.getElementById('v-location') as HTMLInputElement).value,
-      latitude: 23.2332,
-      longitude: 77.4343,
-      photoUrl: 'https://images.unsplash.com/photo-1555421689-d68471e189f2?w=400',
+      address: loc,
+      latitude: 28.5708,
+      longitude: 77.3271,
+      photoUrl: uploadedPhotoUrl,
       visitTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       isVerified: true,
-      notes: (document.getElementById('v-notes') as HTMLTextAreaElement).value
+      notes: notes,
+      collectionAmount: colAmt
     };
+
     await api.addStoreVisit(newV);
-    showToast('Store visit submitted and verified with checkbox [✓]!', '🎉');
-    renderStoreVisits();
+    showToast(`Store visit submitted for ${storeName} [✓]!`, '🎉');
+    await renderStoreVisits();
   });
 }
 
-// 5. PARTIES / CUSTOMERS (Matching bottom screen 4)
+(window as any).toggleVisitStatus = async (id: string, isChecked: boolean) => {
+  await api.toggleVisitVerified(id, isChecked);
+  showToast(`Store visit verification updated to [${isChecked ? '✓' : '✗'}]`, '✅');
+};
+
+// ============================================================================
+// 5. PARTIES / CUSTOMERS VIEW
+// ============================================================================
 async function renderParties() {
   const parties = await api.getParties();
 
@@ -845,7 +965,7 @@ async function renderParties() {
     <div class="dash-header-row">
       <div>
         <h1 class="dash-title">Parties / Customers</h1>
-        <p class="dash-subtitle">Retailer master directory, customer biodata and payment reminders</p>
+        <p class="dash-subtitle">Noida retailer master directory, customer biodata and 1-Click WhatsApp payment reminders</p>
       </div>
       <button class="btn btn-primary" id="btn-add-party-top">+ Add Party</button>
     </div>
@@ -853,47 +973,47 @@ async function renderParties() {
     <div class="card-white" style="margin-bottom: 20px;">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
         <div style="display: flex; gap: 8px;">
-          <button class="btn btn-primary btn-sm party-filter-btn active" data-tab="all">All</button>
-          <button class="btn btn-secondary btn-sm party-filter-btn" data-tab="active">Active</button>
-          <button class="btn btn-secondary btn-sm party-filter-btn" data-tab="overdue">Overdue</button>
+          <button class="btn btn-primary btn-sm party-filter-btn active" data-tab="all">All (${parties.length})</button>
+          <button class="btn btn-secondary btn-sm party-filter-btn" data-tab="active">Active (${parties.filter(p => p.currentBalance === 0).length})</button>
+          <button class="btn btn-secondary btn-sm party-filter-btn" data-tab="overdue">Overdue (${parties.filter(p => p.currentBalance > 0).length})</button>
         </div>
-        <input type="text" id="party-search-input" class="form-input" placeholder="Search party by name, phone..." style="width: 250px;">
+        <input type="text" id="party-search-input" class="form-input" placeholder="Search party by name, phone, GST..." style="width: 280px;">
       </div>
 
       <table class="clean-table">
         <thead>
           <tr>
-            <th>Name</th>
+            <th>Name & Shop</th>
             <th>Mobile</th>
             <th>Outstanding</th>
             <th>Status</th>
-            <th>Biodata</th>
+            <th>Customer Biodata</th>
             <th>Action</th>
           </tr>
         </thead>
         <tbody id="parties-table-body">
           ${parties.map(p => `
-            <tr class="party-tr" data-status="${p.duePaymentDate?.includes('overdue') ? 'overdue' : 'active'}">
+            <tr class="party-tr" data-status="${p.currentBalance > 0 ? 'overdue' : 'active'}">
               <td>
                 <strong>${p.shopName}</strong>
-                <div style="font-size: 0.72rem; color: #64748b;">${p.name}</div>
+                <div style="font-size: 0.72rem; color: #64748b;">${p.name} • 📍 ${p.address}</div>
               </td>
               <td style="font-family: var(--font-mono);">${p.phone}</td>
               <td style="font-family: var(--font-mono); font-weight: 700; color: ${p.currentBalance > 0 ? '#ef4444' : '#059669'};">
                 ${formatCurrency(p.currentBalance)}
               </td>
               <td>
-                <span class="status-pill ${p.duePaymentDate?.includes('overdue') ? 'status-overdue' : (p.duePaymentDate === 'Paid' ? 'status-paid' : 'status-due-soon')}">
-                  ${p.duePaymentDate || 'Active'}
+                <span class="status-pill ${p.currentBalance > 0 ? 'status-overdue' : 'status-present'}">
+                  ${p.currentBalance > 0 ? (p.duePaymentDate || 'Overdue') : 'Paid / Clean'}
                 </span>
               </td>
-              <td style="max-width: 240px; font-size: 0.75rem; color: #64748b; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">
+              <td style="max-width: 240px; font-size: 0.75rem; color: #475569; text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">
                 ${p.biodata}
               </td>
               <td>
                 <div style="display: flex; gap: 6px;">
                   <button class="btn btn-secondary btn-sm" onclick="window.viewPartyDetails('${p.id}')">View</button>
-                  <button class="btn btn-whatsapp btn-sm" onclick="window.sendWhatsAppReminder('${p.phone}', '${p.name}', '${p.shopName}', ${p.currentBalance}, '${p.duePaymentDate}')">📲</button>
+                  <button class="btn btn-whatsapp btn-sm" onclick="window.sendWhatsAppReminder('${p.phone}', '${p.name}', '${p.shopName}', ${p.currentBalance}, '${p.duePaymentDate || 'Immediate'}')">📲 Remind</button>
                 </div>
               </td>
             </tr>
@@ -919,13 +1039,13 @@ async function renderParties() {
         const s = tr.getAttribute('data-status');
         if (tab === 'all') (tr as HTMLElement).style.display = '';
         else if (tab === 'overdue' && s === 'overdue') (tr as HTMLElement).style.display = '';
-        else if (tab === 'active' && s !== 'overdue') (tr as HTMLElement).style.display = '';
+        else if (tab === 'active' && s === 'active') (tr as HTMLElement).style.display = '';
         else (tr as HTMLElement).style.display = 'none';
       });
     });
   });
 
-  // Search
+  // Search input
   document.getElementById('party-search-input')?.addEventListener('input', (e) => {
     const q = (e.target as HTMLInputElement).value.toLowerCase();
     document.querySelectorAll('.party-tr').forEach(tr => {
@@ -935,17 +1055,20 @@ async function renderParties() {
   });
 }
 
-// 6. INVOICES & BILLING (Matching bottom screens 5 & 6)
+// ============================================================================
+// 6. INVOICES & BILLING VIEW (With IMEI tracking & Recent Invoices List)
+// ============================================================================
 async function renderInvoices() {
   const parties = cachedParties;
+  const invoices = await api.getInvoices();
 
   viewContent.innerHTML = `
     <div class="dash-header-row">
       <div>
         <h1 class="dash-title">Invoice Creation</h1>
-        <p class="dash-subtitle">Generate bills, product items, and print GST tax invoices</p>
+        <p class="dash-subtitle">Handset billing engine with 15-digit IMEI tracking, GST 18%, and printable receipt</p>
       </div>
-      <button class="btn btn-secondary" onclick="window.previewInvoice('INV-2026-0156')">👁️ Preview Sample Invoice</button>
+      <button class="btn btn-secondary" onclick="window.previewInvoice('${invoices[0]?.id || 'INV-2026-0156'}')">👁️ Preview Sample Bill</button>
     </div>
 
     <!-- Screen 5: Invoice Creation Form -->
@@ -954,23 +1077,33 @@ async function renderInvoices() {
       
       <div class="form-row">
         <div class="form-group">
-          <label class="form-label">Customer *</label>
+          <label class="form-label">Customer / Retailer *</label>
           <select id="inv-cust-select" class="form-select">
-            ${parties.map(p => `<option value="${p.id}" data-name="${p.shopName}">${p.shopName}</option>`).join('')}
+            ${parties.map(p => `<option value="${p.id}" data-name="${p.name}" data-shop="${p.shopName}" data-phone="${p.phone}" data-address="${p.address}">${p.shopName} (${p.name}) - Balance: ${formatCurrency(p.currentBalance)}</option>`).join('')}
           </select>
         </div>
         <div class="form-group">
           <label class="form-label">Invoice Date *</label>
           <input type="text" class="form-input" value="11 Oct 2026" id="inv-date-input">
         </div>
+        <div class="form-group">
+          <label class="form-label">Payment Mode</label>
+          <select id="inv-mode-select" class="form-select">
+            <option value="UPI">UPI Payment</option>
+            <option value="CASH">Cash</option>
+            <option value="SPLIT">Split (UPI + Cash)</option>
+            <option value="CREDIT">Credit (On Account)</option>
+          </select>
+        </div>
       </div>
 
-      <!-- Items Table matching screenshot screen 5 -->
+      <!-- Items Table with 15-digit IMEI tracking -->
       <table class="clean-table" style="margin: 16px 0;">
         <thead>
           <tr style="background: #f8fafc;">
-            <th>Product</th>
-            <th style="width: 100px;">Qty</th>
+            <th>Product Description</th>
+            <th style="width: 190px;">15-Digit IMEI No.</th>
+            <th style="width: 90px;">Qty</th>
             <th style="width: 120px;">Rate (₹)</th>
             <th style="width: 120px; text-align: right;">Amount</th>
             <th style="width: 50px;"></th>
@@ -978,14 +1111,16 @@ async function renderInvoices() {
         </thead>
         <tbody id="invoice-items-tbody">
           <tr class="inv-row">
-            <td><input type="text" class="form-input item-desc" value="Mobile Cover"></td>
-            <td><input type="number" class="form-input item-qty" value="10" min="1"></td>
-            <td><input type="number" class="form-input item-rate" value="150" min="1"></td>
-            <td style="text-align: right; font-weight: 700;" class="item-amt">₹ 1,500</td>
+            <td><input type="text" class="form-input item-desc" value="Vivo Y200 5G (8GB/128GB)"></td>
+            <td><input type="text" class="form-input item-imei" value="864201051234567" maxlength="15" style="font-family: var(--font-mono); font-size: 0.78rem;"></td>
+            <td><input type="number" class="form-input item-qty" value="1" min="1"></td>
+            <td><input type="number" class="form-input item-rate" value="21999" min="1"></td>
+            <td style="text-align: right; font-weight: 700;" class="item-amt">₹ 21,999</td>
             <td><button class="btn btn-secondary btn-sm" onclick="this.closest('tr').remove(); window.recalcInvoice();">✕</button></td>
           </tr>
           <tr class="inv-row">
-            <td><input type="text" class="form-input item-desc" value="Screen Guard"></td>
+            <td><input type="text" class="form-input item-desc" value="Screen Guard 11D Premium"></td>
+            <td><input type="text" class="form-input item-imei" value="N/A" style="font-family: var(--font-mono); font-size: 0.78rem;"></td>
             <td><input type="number" class="form-input item-qty" value="20" min="1"></td>
             <td><input type="number" class="form-input item-rate" value="50" min="1"></td>
             <td style="text-align: right; font-weight: 700;" class="item-amt">₹ 1,000</td>
@@ -994,30 +1129,71 @@ async function renderInvoices() {
         </tbody>
       </table>
 
-      <button class="btn btn-secondary btn-sm" id="btn-add-item-row" style="margin-bottom: 16px;">+ Add Item</button>
+      <button class="btn btn-secondary btn-sm" id="btn-add-item-row" style="margin-bottom: 16px;">+ Add Product Item</button>
 
       <!-- Totals -->
       <div style="display: flex; justify-content: flex-end;">
-        <div style="width: 240px; font-size: 0.88rem;">
+        <div style="width: 280px; font-size: 0.88rem;">
           <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
             <span>Subtotal</span>
-            <strong id="inv-subtotal-val">₹ 2,500</strong>
+            <strong id="inv-subtotal-val">₹ 22,999</strong>
           </div>
           <div style="display: flex; justify-content: space-between; margin-bottom: 6px; color: #64748b;">
             <span>GST (18%)</span>
-            <span id="inv-gst-val">₹ 450</span>
+            <span id="inv-gst-val">₹ 4,139</span>
           </div>
           <div style="display: flex; justify-content: space-between; font-size: 1.15rem; font-weight: 800; border-top: 1px solid var(--border-light); padding-top: 8px;">
             <span>Total</span>
-            <span style="color: #2563eb;" id="inv-total-val">₹ 2,950</span>
+            <span style="color: #2563eb;" id="inv-total-val">₹ 27,138</span>
           </div>
         </div>
       </div>
 
       <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px;">
-        <button class="btn btn-secondary" onclick="window.previewInvoice('INV-2026-0156')">👁️ Preview</button>
-        <button class="btn btn-primary" onclick="showToast('Invoice saved & customer balance updated!', '🧾')">💾 Save</button>
+        <button class="btn btn-primary" id="btn-save-invoice" style="padding: 10px 24px;">💾 Save & Generate Invoice</button>
       </div>
+    </div>
+
+    <!-- Recent Invoices Register Table -->
+    <div class="card-white">
+      <h3 style="font-size: 1.05rem; margin-bottom: 14px;">Invoices Register (${invoices.length})</h3>
+      <table class="clean-table">
+        <thead>
+          <tr>
+            <th>Invoice No</th>
+            <th>Date</th>
+            <th>Customer</th>
+            <th>Items</th>
+            <th>Total Amount</th>
+            <th>Payment Mode</th>
+            <th>Status</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${invoices.map(inv => `
+            <tr>
+              <td><strong style="font-family: var(--font-mono); color: #2563eb;">${inv.invoiceNumber}</strong></td>
+              <td>${inv.date}</td>
+              <td>
+                <strong>${inv.shopName}</strong>
+                <div style="font-size: 0.72rem; color: #64748b;">${inv.customerName}</div>
+              </td>
+              <td>${inv.items?.length || 1} items</td>
+              <td style="font-weight: 700; font-family: var(--font-mono);">${formatCurrency(inv.totalAmount)}</td>
+              <td><span class="status-pill status-present">${inv.paymentMode}</span></td>
+              <td>
+                <span class="status-pill ${inv.status === 'paid' ? 'status-present' : 'status-overdue'}">
+                  ${inv.status === 'paid' ? 'Paid' : 'Unpaid'}
+                </span>
+              </td>
+              <td>
+                <button class="btn btn-secondary btn-sm" onclick="window.previewInvoice('${inv.id}')">👁️ View Receipt</button>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
     </div>
   `;
 
@@ -1027,10 +1203,11 @@ async function renderInvoices() {
     const tr = document.createElement('tr');
     tr.className = 'inv-row';
     tr.innerHTML = `
-      <td><input type="text" class="form-input item-desc" placeholder="Product name" value="Type-C Cable"></td>
+      <td><input type="text" class="form-input item-desc" placeholder="Product name" value="Fast Charger 65W Type-C"></td>
+      <td><input type="text" class="form-input item-imei" value="N/A" style="font-family: var(--font-mono); font-size: 0.78rem;"></td>
       <td><input type="number" class="form-input item-qty" value="5" min="1"></td>
-      <td><input type="number" class="form-input item-rate" value="100" min="1"></td>
-      <td style="text-align: right; font-weight: 700;" class="item-amt">₹ 500</td>
+      <td><input type="number" class="form-input item-rate" value="450" min="1"></td>
+      <td style="text-align: right; font-weight: 700;" class="item-amt">₹ 2,250</td>
       <td><button class="btn btn-secondary btn-sm" onclick="this.closest('tr').remove(); window.recalcInvoice();">✕</button></td>
     `;
     tbody?.appendChild(tr);
@@ -1039,6 +1216,67 @@ async function renderInvoices() {
 
   tbody?.addEventListener('input', () => {
     (window as any).recalcInvoice();
+  });
+
+  (window as any).recalcInvoice();
+
+  // Save invoice action
+  document.getElementById('btn-save-invoice')?.addEventListener('click', async () => {
+    const select = document.getElementById('inv-cust-select') as HTMLSelectElement;
+    const selectedOption = select.options[select.selectedIndex];
+    const customerId = select.value;
+    const customerName = selectedOption.getAttribute('data-name') || 'Customer';
+    const shopName = selectedOption.getAttribute('data-shop') || 'Shop';
+    const customerPhone = selectedOption.getAttribute('data-phone') || '0987654321';
+    const invoiceDate = (document.getElementById('inv-date-input') as HTMLInputElement).value || '11 Oct 2026';
+    const mode = (document.getElementById('inv-mode-select') as HTMLSelectElement).value as any;
+
+    const items: InvoiceItem[] = [];
+    document.querySelectorAll('.inv-row').forEach((row, i) => {
+      const desc = (row.querySelector('.item-desc') as HTMLInputElement)?.value || `Product ${i + 1}`;
+      const imei = (row.querySelector('.item-imei') as HTMLInputElement)?.value || 'N/A';
+      const qty = Number((row.querySelector('.item-qty') as HTMLInputElement)?.value) || 1;
+      const rate = Number((row.querySelector('.item-rate') as HTMLInputElement)?.value) || 100;
+      items.push({
+        id: 'ITM-' + Date.now() + '-' + i,
+        description: desc,
+        imeiNumber: imei,
+        quantity: qty,
+        rate: rate,
+        amount: qty * rate
+      });
+    });
+
+    const subtotal = items.reduce((sum, item) => sum + item.amount, 0);
+    const gst = subtotal * 0.18;
+    const grandTotal = subtotal + gst;
+    const isCredit = mode === 'CREDIT';
+    const paidAmt = isCredit ? 0 : grandTotal;
+    const balanceAmt = grandTotal - paidAmt;
+
+    const newInvoice: Invoice = {
+      id: 'INV-2026-0' + Math.floor(160 + Math.random() * 800),
+      invoiceNumber: 'INV-2026-0' + Math.floor(160 + Math.random() * 800),
+      customerId: customerId,
+      customerName: customerName,
+      shopName: shopName,
+      customerPhone: customerPhone,
+      date: invoiceDate,
+      items: items,
+      subtotal: subtotal,
+      gstPercent: 18,
+      gstAmount: gst,
+      totalAmount: grandTotal,
+      paidAmount: paidAmt,
+      balanceAmount: balanceAmt,
+      paymentMode: mode,
+      status: isCredit ? 'unpaid' : 'paid'
+    };
+
+    await api.createInvoice(newInvoice);
+    showToast(`Invoice ${newInvoice.invoiceNumber} created & customer ledger updated!`, '🧾');
+    await renderInvoices();
+    (window as any).previewInvoice(newInvoice.id);
   });
 }
 
@@ -1063,37 +1301,41 @@ async function renderInvoices() {
   if (totEl) totEl.textContent = formatCurrency(total);
 };
 
-// 7. COLLECTIONS (Matching bottom screen 7)
+// ============================================================================
+// 7. COLLECTIONS VIEW
+// ============================================================================
 async function renderCollections() {
   const payments = await api.getPayments();
+
+  const totalCollection = payments.reduce((sum, p) => sum + p.amount, 0);
+  const upiCollection = payments.filter(p => p.paymentMode === 'UPI').reduce((sum, p) => sum + p.amount, 0);
+  const cashCollection = payments.filter(p => p.paymentMode === 'CASH').reduce((sum, p) => sum + p.amount, 0);
 
   viewContent.innerHTML = `
     <div class="dash-header-row">
       <div>
         <h1 class="dash-title">Collections</h1>
-        <p class="dash-subtitle">Track all payments and collections</p>
+        <p class="dash-subtitle">Track all field payment receipts, UPI reconciliation, and cash in hand</p>
       </div>
       <div style="display: flex; gap: 10px;">
         <button class="btn btn-secondary btn-sm">📅 01 Oct 2026 - 11 Oct 2026</button>
-        <button class="btn btn-secondary btn-sm">All Types ▼</button>
-        <button class="btn btn-secondary btn-sm">All Parties ▼</button>
-        <button class="btn btn-primary btn-sm" onclick="window.exportCollectionsCSV()">📥 Export</button>
+        <button class="btn btn-primary btn-sm" onclick="window.exportCollectionsCSV()">📥 Export Collections CSV</button>
       </div>
     </div>
 
-    <!-- 3 Collection KPI Cards (Matching Screen 7) -->
+    <!-- 3 Collection KPI Cards -->
     <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 22px;">
       <div class="kpi-card-white">
         <div class="kpi-label">Total Collection</div>
-        <div class="kpi-num" style="color: #0f172a; margin-top: 4px;">₹ 5,42,800</div>
+        <div class="kpi-num" style="color: #0f172a; margin-top: 4px;">${formatCurrency(totalCollection)}</div>
       </div>
       <div class="kpi-card-white">
-        <div class="kpi-label">UPI Collection</div>
-        <div class="kpi-num" style="color: #2563eb; margin-top: 4px;">₹ 3,18,000</div>
+        <div class="kpi-label">UPI Collection (Online)</div>
+        <div class="kpi-num" style="color: #2563eb; margin-top: 4px;">${formatCurrency(upiCollection)}</div>
       </div>
       <div class="kpi-card-white">
-        <div class="kpi-label">Cash Collection</div>
-        <div class="kpi-num" style="color: #d97706; margin-top: 4px;">₹ 2,24,800</div>
+        <div class="kpi-label">Cash Collection (In Hand)</div>
+        <div class="kpi-num" style="color: #d97706; margin-top: 4px;">${formatCurrency(cashCollection)}</div>
       </div>
     </div>
 
@@ -1101,21 +1343,21 @@ async function renderCollections() {
     <div class="card-white">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
         <div style="display: flex; gap: 8px;">
-          <button class="btn btn-primary btn-sm pay-filter-btn active" data-type="all">All</button>
-          <button class="btn btn-secondary btn-sm pay-filter-btn" data-type="UPI">UPI</button>
-          <button class="btn btn-secondary btn-sm pay-filter-btn" data-type="CASH">Cash</button>
+          <button class="btn btn-primary btn-sm pay-filter-btn active" data-type="all">All (${payments.length})</button>
+          <button class="btn btn-secondary btn-sm pay-filter-btn" data-type="UPI">UPI (${payments.filter(p => p.paymentMode === 'UPI').length})</button>
+          <button class="btn btn-secondary btn-sm pay-filter-btn" data-type="CASH">Cash (${payments.filter(p => p.paymentMode === 'CASH').length})</button>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="window.openDirectPaymentModal()">+ Record Payment</button>
+        <button class="btn btn-primary btn-sm" onclick="window.openDirectPaymentModal()">+ Record New Payment</button>
       </div>
 
       <table class="clean-table">
         <thead>
           <tr>
             <th>Date</th>
-            <th>Party</th>
+            <th>Party / Retailer</th>
             <th>Amount</th>
             <th>Type</th>
-            <th>Reference</th>
+            <th>Reference / UTR</th>
             <th>Collected By</th>
             <th>Status</th>
           </tr>
@@ -1161,15 +1403,25 @@ async function renderCollections() {
   });
 }
 
+// ============================================================================
 // 8. REPORTS VIEW
+// ============================================================================
 async function renderReports() {
+  const visits = await api.getStoreVisits();
+  const payments = await api.getPayments();
+  const upiTotal = payments.filter(p => p.paymentMode === 'UPI').reduce((sum, p) => sum + p.amount, 0);
+  const cashTotal = payments.filter(p => p.paymentMode === 'CASH').reduce((sum, p) => sum + p.amount, 0);
+  const total = upiTotal + cashTotal || 1;
+  const upiPercent = ((upiTotal / total) * 100).toFixed(1);
+  const cashPercent = ((cashTotal / total) * 100).toFixed(1);
+
   viewContent.innerHTML = `
     <div class="dash-header-row">
       <div>
         <h1 class="dash-title">Reports & Analytics</h1>
-        <p class="dash-subtitle">Performance audits, collection trends and field efficiency</p>
+        <p class="dash-subtitle">Noida & NCR performance audits, collection trends and field efficiency</p>
       </div>
-      <button class="btn btn-primary" onclick="showToast('Executive PDF Report generated!', '📊')">📥 Download Monthly PDF Report</button>
+      <button class="btn btn-primary" onclick="window.print()">🖨️ Print Executive Report</button>
     </div>
 
     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
@@ -1187,19 +1439,19 @@ async function renderReports() {
           <tbody>
             <tr>
               <td><strong>Rohit Kumar</strong></td>
-              <td>86</td>
+              <td>${visits.filter(v => v.staffName.includes('Rohit')).length + 12}</td>
               <td>₹ 2,45,000</td>
               <td><span class="status-pill status-present">112%</span></td>
             </tr>
             <tr>
               <td><strong>Amit Singh</strong></td>
-              <td>74</td>
+              <td>${visits.filter(v => v.staffName.includes('Amit')).length + 9}</td>
               <td>₹ 1,82,000</td>
               <td><span class="status-pill status-present">98%</span></td>
             </tr>
             <tr>
               <td><strong>Neha Verma</strong></td>
-              <td>68</td>
+              <td>${visits.filter(v => v.staffName.includes('Neha')).length + 8}</td>
               <td>₹ 1,15,800</td>
               <td><span class="status-pill status-late">91%</span></td>
             </tr>
@@ -1211,23 +1463,25 @@ async function renderReports() {
         <h3 style="font-size: 1.05rem; margin-bottom: 12px;">Payment Method Distribution</h3>
         <div style="background: #f8fafc; padding: 20px; border-radius: 10px; border: 1px solid var(--border-light); margin-bottom: 16px;">
           <div style="display: flex; justify-content: space-between; margin-bottom: 8px;">
-            <span>UPI / Netbanking: <strong>58.6%</strong></span>
-            <span>Cash in Hand: <strong>41.4%</strong></span>
+            <span>UPI / Netbanking: <strong>${upiPercent}%</strong></span>
+            <span>Cash in Hand: <strong>${cashPercent}%</strong></span>
           </div>
           <div style="height: 14px; background: #e2e8f0; border-radius: 99px; overflow: hidden; display: flex;">
-            <div style="background: #2563eb; width: 58.6%;"></div>
-            <div style="background: #f59e0b; width: 41.4%;"></div>
+            <div style="background: #2563eb; width: ${upiPercent}%;"></div>
+            <div style="background: #f59e0b; width: ${cashPercent}%;"></div>
           </div>
         </div>
         <p style="font-size: 0.8rem; color: #64748b;">
-          Digital UPI payments increased by 14% compared to previous month.
+          Digital UPI payments account for the majority of collection in Sector 18 and Sector 62 retail hubs.
         </p>
       </div>
     </div>
   `;
 }
 
-// 9. MOBILE SCREENS (Employee Handheld / PWA View matching Screen 8 in screenshot)
+// ============================================================================
+// 9. MOBILE SCREENS SIMULATOR (Screen 8)
+// ============================================================================
 function renderMobileScreens() {
   viewContent.innerHTML = `
     <div class="dash-header-row">
@@ -1285,26 +1539,29 @@ function renderMobileScreens() {
   });
 }
 
-function renderSubMobileScreen(screen: string) {
+async function renderSubMobileScreen(screen: string) {
   const container = document.getElementById('phone-screen-content');
   if (!container) return;
+
+  const visits = await api.getStoreVisits();
+  const parties = cachedParties;
 
   if (screen === 'home') {
     container.innerHTML = `
       <div style="padding: 18px; background: #2563eb; color: white;">
         <div style="font-size: 0.75rem; opacity: 0.9;">Good Morning</div>
         <div style="font-size: 1.15rem; font-weight: 700;">Rohit Kumar</div>
-        <div style="font-size: 0.7rem; background: rgba(255,255,255,0.2); display: inline-block; padding: 2px 8px; border-radius: 99px; margin-top: 4px;">On Duty: MP Nagar, Bhopal</div>
+        <div style="font-size: 0.7rem; background: rgba(255,255,255,0.2); display: inline-block; padding: 2px 8px; border-radius: 99px; margin-top: 4px;">On Duty: Sector 18, Noida</div>
       </div>
       <div style="padding: 14px; display: flex; flex-direction: column; gap: 12px;">
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
           <div style="background: white; padding: 14px; border-radius: 12px; border: 1px solid var(--border-light); text-align: center;">
-            <div style="font-size: 1.6rem; font-weight: 800; color: #2563eb;">5</div>
+            <div style="font-size: 1.6rem; font-weight: 800; color: #2563eb;">${visits.length}</div>
             <div style="font-size: 0.75rem; color: #64748b;">Visits Done</div>
           </div>
           <div style="background: white; padding: 14px; border-radius: 12px; border: 1px solid var(--border-light); text-align: center;">
-            <div style="font-size: 1.6rem; font-weight: 800; color: #059669;">2</div>
-            <div style="font-size: 0.75rem; color: #64748b;">Collections</div>
+            <div style="font-size: 1.6rem; font-weight: 800; color: #059669;">₹ 25k</div>
+            <div style="font-size: 0.75rem; color: #64748b;">Collected Today</div>
           </div>
         </div>
         <button class="btn btn-primary" onclick="window.renderSubMobileScreen('visit')" style="padding: 12px; border-radius: 10px;">+ New Store Visit</button>
@@ -1316,39 +1573,49 @@ function renderSubMobileScreen(screen: string) {
       <div style="padding: 20px; text-align: center; flex: 1; display: flex; flex-direction: column; justify-content: center;">
         <div style="width: 72px; height: 72px; border-radius: 50%; background: #ecfdf5; color: #059669; font-size: 2.2rem; display: flex; align-items: center; justify-content: center; margin: 0 auto 14px;">✓</div>
         <h3 style="font-size: 1.15rem; margin-bottom: 4px;">You are checked In</h3>
-        <p style="font-size: 0.8rem; color: #64748b; margin-bottom: 18px;">09:08 AM • MP Nagar, Bhopal</p>
-        <button class="btn btn-danger" style="padding: 14px; font-size: 0.95rem; border-radius: 10px;" onclick="showToast('Checked out at ' + new Date().toLocaleTimeString())">
-          🔴 Check Out
-        </button>
+        <p style="font-size: 0.8rem; color: #64748b; margin-bottom: 18px;">09:08 AM • Sector 18, Noida</p>
+        <div style="display: flex; flex-direction: column; gap: 10px;">
+          <button class="btn btn-danger" style="padding: 12px; font-size: 0.9rem; border-radius: 10px;" onclick="window.mobileCheckOut()">
+            🔴 Punch Out Now
+          </button>
+          <button class="btn btn-primary" style="padding: 12px; font-size: 0.9rem; border-radius: 10px;" onclick="window.mobileCheckIn()">
+            🟢 Punch In Again
+          </button>
+        </div>
       </div>
     `;
   } else if (screen === 'visit') {
     container.innerHTML = `
       <div style="padding: 16px;">
-        <h4 style="font-size: 0.95rem; margin-bottom: 12px;">Store Visit</h4>
-        <div style="background: white; padding: 12px; border-radius: 8px; border: 1px solid var(--border-light); margin-bottom: 10px;">
-          <div style="font-size: 0.72rem; color: #64748b;">Select Store:</div>
-          <div style="font-weight: 700; font-size: 0.85rem;">Kumar Mobile Point</div>
+        <h4 style="font-size: 0.95rem; margin-bottom: 12px;">Mobile Store Visit</h4>
+        <div class="form-group">
+          <label class="form-label">Store</label>
+          <select id="mob-store-select" class="form-select" style="font-size: 0.8rem;">
+            ${parties.map(p => `<option value="${p.shopName}">${p.shopName}</option>`).join('')}
+          </select>
         </div>
-        <div style="background: white; padding: 12px; border-radius: 8px; border: 1px solid var(--border-light); margin-bottom: 10px;">
-          <div style="font-size: 0.72rem; color: #64748b;">Location:</div>
-          <div style="font-size: 0.82rem;">MP Nagar, Bhopal (Auto-captured)</div>
+        <div class="form-group">
+          <label class="form-label">Location</label>
+          <input type="text" id="mob-v-loc" class="form-input" value="Sector 18, Atta Market, Noida" style="font-size: 0.8rem;">
         </div>
-        <div style="display: flex; gap: 8px; margin-bottom: 14px;">
-          <img src="https://images.unsplash.com/photo-1555421689-d68471e189f2?w=100" style="width: 50px; height: 50px; border-radius: 6px; object-fit: cover;">
-          <img src="https://images.unsplash.com/photo-1526738549149-8e07eca6c147?w=100" style="width: 50px; height: 50px; border-radius: 6px; object-fit: cover;">
+        <div class="form-group">
+          <label class="form-label">Photo Preview</label>
+          <div style="display: flex; gap: 8px; margin-bottom: 10px;">
+            <img src="https://images.unsplash.com/photo-1555421689-d68471e189f2?w=100" style="width: 50px; height: 50px; border-radius: 6px; object-fit: cover;">
+          </div>
         </div>
-        <button class="btn btn-primary" style="width: 100%; padding: 12px;" onclick="showToast('Visit Submitted [✓]!')">Submit Visit</button>
+        <button class="btn btn-primary" style="width: 100%; padding: 12px;" onclick="window.mobileSubmitVisit()">Submit Visit</button>
       </div>
     `;
   } else if (screen === 'parties') {
     container.innerHTML = `
       <div style="padding: 14px; overflow-y: auto;">
-        <h4 style="font-size: 0.95rem; margin-bottom: 10px;">Retail Parties</h4>
-        ${cachedParties.slice(0, 4).map(p => `
+        <h4 style="font-size: 0.95rem; margin-bottom: 10px;">Retail Parties (${parties.length})</h4>
+        ${parties.slice(0, 5).map(p => `
           <div style="background: white; padding: 10px; border-radius: 8px; border: 1px solid var(--border-light); margin-bottom: 8px;">
             <div style="font-weight: 700; font-size: 0.82rem;">${p.shopName}</div>
             <div style="font-size: 0.78rem; color: #ef4444; font-weight: 700;">${formatCurrency(p.currentBalance)}</div>
+            <div style="font-size: 0.7rem; color: #64748b;">📍 ${p.address}</div>
           </div>
         `).join('')}
       </div>
@@ -1357,71 +1624,231 @@ function renderSubMobileScreen(screen: string) {
     container.innerHTML = `
       <div style="padding: 16px;">
         <h4 style="font-size: 0.95rem; margin-bottom: 12px;">Collect Payment</h4>
-        <input type="number" class="form-input" placeholder="Amount (₹)" style="margin-bottom: 10px;" value="15000">
-        <select class="form-select" style="margin-bottom: 14px;">
-          <option>UPI</option>
-          <option>Cash</option>
-        </select>
-        <button class="btn btn-primary" style="width: 100%; padding: 12px;" onclick="showToast('Payment Saved in IndexedDB!')">Save Payment</button>
+        <div class="form-group">
+          <label class="form-label">Select Party</label>
+          <select id="mob-pay-party" class="form-select">
+            ${parties.map(p => `<option value="${p.id}">${p.shopName} (${formatCurrency(p.currentBalance)})</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Amount (₹)</label>
+          <input type="number" id="mob-pay-amt" class="form-input" value="15000">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Payment Mode</label>
+          <select id="mob-pay-mode" class="form-select">
+            <option value="UPI">UPI</option>
+            <option value="CASH">Cash</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" style="width: 100%; padding: 12px;" onclick="window.mobileSubmitPayment()">Save Payment</button>
       </div>
     `;
   }
 }
 (window as any).renderSubMobileScreen = renderSubMobileScreen;
 
-// 10. DATABASE & SETTINGS VIEW
+// Mobile simulator actions
+(window as any).mobileCheckIn = async () => {
+  await api.recordPunchIn({
+    id: 'ATT-' + Date.now(),
+    staffId: 'STF-01',
+    staffName: 'Rohit Kumar',
+    date: '2026-10-11',
+    punchInTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    punchInLocation: 'Sector 18, Atta Market, Noida',
+    status: 'present',
+    photoUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'
+  });
+  showToast('Punch in recorded in database!', '🟢');
+  renderSubMobileScreen('attendance');
+};
+
+(window as any).mobileCheckOut = async () => {
+  showToast('Punch out completed at ' + new Date().toLocaleTimeString(), '🔴');
+  renderSubMobileScreen('attendance');
+};
+
+(window as any).mobileSubmitVisit = async () => {
+  const store = (document.getElementById('mob-store-select') as HTMLSelectElement)?.value || 'Sharma Traders';
+  const loc = (document.getElementById('mob-v-loc') as HTMLInputElement)?.value || 'Sector 18, Noida';
+  await api.addStoreVisit({
+    id: 'VST-' + Date.now(),
+    staffId: 'STF-01',
+    staffName: 'Rohit Kumar',
+    storeName: store,
+    ownerName: 'Retailer',
+    phone: '0987654321',
+    address: loc,
+    latitude: 28.5708,
+    longitude: 77.3271,
+    photoUrl: 'https://images.unsplash.com/photo-1555421689-d68471e189f2?w=400',
+    visitTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    isVerified: true,
+    notes: 'Submitted via Mobile App Simulator'
+  });
+  showToast(`Store visit submitted for ${store} [✓]!`, '🎉');
+  renderSubMobileScreen('home');
+};
+
+(window as any).mobileSubmitPayment = async () => {
+  const select = document.getElementById('mob-pay-party') as HTMLSelectElement;
+  const partyId = select.value;
+  const party = cachedParties.find(p => p.id === partyId) || cachedParties[0];
+  const amt = Number((document.getElementById('mob-pay-amt') as HTMLInputElement).value) || 10000;
+  const mode = (document.getElementById('mob-pay-mode') as HTMLSelectElement).value as any;
+
+  await api.addPayment({
+    id: 'PAY-' + Date.now(),
+    customerId: party.id,
+    customerName: party.name,
+    shopName: party.shopName,
+    amount: amt,
+    paymentMode: mode,
+    transactionRef: 'MOB-PAY-' + Math.floor(1000 + Math.random() * 9000),
+    date: '11 Oct 2026',
+    collectedBy: 'Rohit Kumar',
+    notes: 'Collected on mobile app'
+  });
+
+  showToast(`Payment of ₹ ${amt} saved & balance updated!`, '💰');
+  renderSubMobileScreen('home');
+};
+
+// ============================================================================
+// 10. DATABASE & SETTINGS VIEW (Switch storage mode, Export, Import, Reset)
+// ============================================================================
 async function renderBackup() {
   const json = await api.exportJson();
+  const currentMode = api.getMode();
 
   viewContent.innerHTML = `
     <div class="dash-header-row">
       <div>
         <h1 class="dash-title">Settings & Database Migration</h1>
-        <p class="dash-subtitle">Export data as JSON, switch to Express TypeScript backend or reset data</p>
+        <p class="dash-subtitle">Toggle between Local IndexedDB and Express Backend, export or reset database</p>
       </div>
+      <button class="btn btn-danger btn-sm" id="btn-reset-demo-data">🔄 Reset to Clean Noida Demo Data</button>
     </div>
 
-    <div style="max-width: 800px; display: flex; flex-direction: column; gap: 20px;">
+    <div style="max-width: 850px; display: flex; flex-direction: column; gap: 20px;">
+      <!-- Storage Engine Toggle -->
       <div class="card-white">
-        <h3 style="font-size: 1.1rem; margin-bottom: 8px;">💾 Backup & Export JSON</h3>
+        <h3 style="font-size: 1.1rem; margin-bottom: 8px;">🔄 Data Source Mode</h3>
         <p style="font-size: 0.82rem; color: #64748b; margin-bottom: 16px;">
-          Download complete database snapshot containing all 24 employees, 86 visits, 156 invoices, and collection entries.
+          Choose whether the application runs offline using browser <strong>IndexedDB</strong> or connects to the <strong>Express TypeScript API</strong> (http://localhost:5000/api).
         </p>
-        <button class="btn btn-primary" id="btn-export-file">📥 Download Full JSON Backup</button>
+
+        <div style="display: flex; gap: 12px; align-items: center;">
+          <button class="btn ${currentMode === 'indexeddb' ? 'btn-primary' : 'btn-secondary'}" id="btn-mode-indexeddb">
+            💽 IndexedDB (Local Offline)
+          </button>
+          <button class="btn ${currentMode === 'backend_api' ? 'btn-primary' : 'btn-secondary'}" id="btn-mode-backend">
+            🌐 Express Backend API (localhost:5000)
+          </button>
+          <span class="badge ${currentMode === 'indexeddb' ? 'badge-primary' : 'badge-primary'}" style="margin-left: auto;">
+            Active: ${currentMode === 'indexeddb' ? 'IndexedDB' : 'Backend REST API'}
+          </span>
+        </div>
       </div>
 
+      <!-- Export & Import Card -->
       <div class="card-white">
-        <h3 style="font-size: 1.1rem; margin-bottom: 8px;">Raw JSON Data Preview</h3>
+        <h3 style="font-size: 1.1rem; margin-bottom: 8px;">💾 Backup, Export & Import JSON</h3>
+        <p style="font-size: 0.82rem; color: #64748b; margin-bottom: 16px;">
+          Download full application snapshot or upload a JSON backup to restore all records.
+        </p>
+
+        <div style="display: flex; gap: 12px; margin-bottom: 16px;">
+          <button class="btn btn-primary" id="btn-export-file">📥 Download Full JSON Backup</button>
+          <button class="btn btn-secondary" id="btn-trigger-import">📤 Upload & Restore JSON</button>
+          <input type="file" id="import-json-file" accept=".json" style="display: none;">
+        </div>
+
+        <h4 style="font-size: 0.9rem; margin-bottom: 8px; color: #475569;">Live Database Snapshot (JSON):</h4>
         <textarea class="form-textarea" rows="8" readonly style="font-family: var(--font-mono); font-size: 0.75rem;">${json}</textarea>
       </div>
     </div>
   `;
 
+  // Storage switcher
+  document.getElementById('btn-mode-indexeddb')?.addEventListener('click', () => {
+    api.setMode('indexeddb');
+    showToast('Switched to IndexedDB (Offline-first)!', '💽');
+    renderBackup();
+  });
+
+  document.getElementById('btn-mode-backend')?.addEventListener('click', () => {
+    api.setMode('backend_api');
+    showToast('Switched to Express Backend API (localhost:5000)!', '🌐');
+    renderBackup();
+  });
+
+  // Export JSON
   document.getElementById('btn-export-file')?.addEventListener('click', async () => {
     const dataStr = await api.exportJson();
     const blob = new Blob([dataStr], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `sam-mobile-erp-data.json`;
+    a.download = `sam-mobile-noida-backup.json`;
     a.click();
     showToast('Backup downloaded successfully!', '📥');
   });
+
+  // Import JSON
+  const importInput = document.getElementById('import-json-file') as HTMLInputElement;
+  document.getElementById('btn-trigger-import')?.addEventListener('click', () => importInput?.click());
+  importInput?.addEventListener('change', (e) => {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = async () => {
+        try {
+          const success = await api.importJson(reader.result as string);
+          if (success) {
+            showToast('JSON database restored successfully!', '🎉');
+            await renderBackup();
+          } else {
+            showToast('Invalid JSON file format', '⚠️');
+          }
+        } catch (err) {
+          showToast('Failed to parse JSON file', '❌');
+        }
+      };
+      reader.readAsText(file);
+    }
+  });
+
+  // Reset to default
+  document.getElementById('btn-reset-demo-data')?.addEventListener('click', async () => {
+    if (confirm('Are you sure you want to reset all data to clean initial Noida demo state?')) {
+      await api.resetToDefaults();
+      showToast('Database reset to fresh Noida demo state!', '🔄');
+      switchView('dashboard');
+    }
+  });
 }
 
-// Global Window Helpers
+// ============================================================================
+// GLOBAL WINDOW HELPERS & MODALS
+// ============================================================================
 (window as any).switchView = (v: string) => switchView(v);
 
-(window as any).focusOnEmployee = (name: string, lat: number, lng: number) => {
+(window as any).focusOnEmployee = (name: string, lat: number, lng: number, addr?: string) => {
   if (activeMap) {
     activeMap.flyTo([lat, lng], 15, { duration: 1.2 });
-    showToast(`Focused on ${name} at MP Nagar, Bhopal!`, '📍');
+    const nameEl = document.getElementById('popup-agent-name');
+    const subEl = document.getElementById('popup-agent-sub');
+    if (nameEl) nameEl.textContent = name;
+    if (subEl) subEl.innerHTML = `${addr || 'Sector 18, Noida'}<br>Last updated: ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    showToast(`Focused on ${name} at ${addr || 'Noida'}!`, '📍');
   }
 };
 
 (window as any).sendWhatsAppReminder = (phone: string, name: string, shop: string, balance: number, dueDate: string) => {
   const clean = phone.replace(/[^0-9]/g, '');
-  const msg = `Namaste ${name} ji (${shop}),\n\nSAM MOBILE ki taraf se reminder:\nApka pending balance *${formatCurrency(balance)}* hai (${dueDate}).\n\nKripya UPI karein: upi://pay?pa=9300035900@upi&pn=SAM%20MOBILE&am=${balance}\n\nDhanyawad!\nSAM MOBILE Helpline: 9300035900`;
+  const msg = `Namaste ${name} ji (${shop}),\n\nSAM MOBILE (Noida) ki taraf se reminder:\nApka pending balance *${formatCurrency(balance)}* hai (${dueDate}).\n\nKripya UPI karein: upi://pay?pa=9300035900@upi&pn=SAM%20MOBILE%20NOIDA&am=${balance}\n\nDhanyawad!\nSAM MOBILE Helpline: 9300035900`;
   window.open(`https://wa.me/91${clean}?text=${encodeURIComponent(msg)}`, '_blank');
   showToast(`WhatsApp reminder opened for ${shop}!`, '📲');
 };
@@ -1434,10 +1861,13 @@ async function renderBackup() {
       <h4>${p.shopName} (${p.name})</h4>
       <p style="color:#64748b; font-size:0.82rem; margin:6px 0;">📍 ${p.address}</p>
       <div style="background:#f8fafc; padding:12px; border-radius:8px; border:1px solid #e2e8f0; margin:12px 0;">
-        <strong>Customer Biodata:</strong>
+        <strong>Customer Biodata & Retail History:</strong>
         <p style="font-size:0.8rem; color:#334155; margin-top:4px;">${p.biodata}</p>
       </div>
-      <div style="font-size:1.1rem; font-weight:700; color:#ef4444;">Outstanding Due: ${formatCurrency(p.currentBalance)}</div>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 14px;">
+        <div style="font-size:1.1rem; font-weight:700; color:${p.currentBalance > 0 ? '#ef4444' : '#059669'};">Outstanding Due: ${formatCurrency(p.currentBalance)}</div>
+        <button class="btn btn-whatsapp" onclick="window.sendWhatsAppReminder('${p.phone}', '${p.name}', '${p.shopName}', ${p.currentBalance}, '${p.duePaymentDate || 'Immediate'}')">📲 Send WhatsApp Reminder</button>
+      </div>
     </div>
   `);
 };
@@ -1449,77 +1879,76 @@ async function renderBackup() {
 (window as any).previewInvoice = async (invoiceId: string) => {
   const invoices = await api.getInvoices();
   const inv = invoices.find(i => i.id === invoiceId) || invoices[0];
+  if (!inv) return;
 
   const html = `
     <div style="background: white; color: #0f172a; padding: 24px; font-size: 0.85rem;" id="invoice-sheet">
       <div style="display: flex; justify-content: space-between; border-bottom: 2px solid #e2e8f0; padding-bottom: 14px; margin-bottom: 14px;">
         <div>
           <h2 style="font-size: 1.4rem; color: #2563eb; margin-bottom: 2px;">SAM MOBILE</h2>
-          <div style="font-size: 0.78rem; color: #64748b;">Your Business Partner • MP Nagar, Bhopal - 462011</div>
+          <div style="font-size: 0.78rem; color: #64748b;">Mobile Handset Distributor • Sector 18, Noida - 201301</div>
+          <div style="font-size: 0.75rem; color: #64748b;">GSTIN: 09ABCD1234F1Z5 • Helpline: 9300035900</div>
         </div>
         <div style="text-align: right;">
-          <h3 style="font-size: 1.1rem; color: #0f172a;">INVOICE</h3>
-          <div style="font-size: 0.8rem; color: #64748b;">Invoice No: ${inv.invoiceNumber}</div>
+          <h3 style="font-size: 1.1rem; color: #0f172a;">TAX INVOICE</h3>
+          <div style="font-size: 0.8rem; color: #64748b;">Invoice No: <strong>${inv.invoiceNumber}</strong></div>
           <div style="font-size: 0.8rem; color: #64748b;">Date: ${inv.date}</div>
         </div>
       </div>
 
       <div style="margin-bottom: 16px;">
-        <div style="font-size: 0.72rem; color: #64748b; font-weight: 700;">BILL TO:</div>
-        <div style="font-weight: 700; font-size: 0.95rem;">${inv.shopName}</div>
-        <div style="font-size: 0.8rem; color: #475569;">MP Nagar, Bhopal - 462011 • GSTIN: 23ABCD1234F1Z5</div>
+        <div style="font-size: 0.72rem; color: #64748b; font-weight: 700;">BILL TO (RETAILER):</div>
+        <div style="font-weight: 700; font-size: 0.95rem;">${inv.shopName} (${inv.customerName})</div>
+        <div style="font-size: 0.8rem; color: #475569;">Sector 18 / Noida NCR • Phone: ${inv.customerPhone}</div>
       </div>
 
       <table class="clean-table" style="margin-bottom: 16px;">
         <thead>
           <tr style="background: #f8fafc;">
             <th>#</th>
-            <th>Product</th>
+            <th>Product Description</th>
+            <th>IMEI Number</th>
             <th style="text-align: center;">Qty</th>
             <th style="text-align: right;">Rate</th>
             <th style="text-align: right;">Amount</th>
           </tr>
         </thead>
         <tbody>
-          <tr>
-            <td>1</td>
-            <td><strong>Mobile Cover</strong></td>
-            <td style="text-align: center;">10</td>
-            <td style="text-align: right;">₹ 150</td>
-            <td style="text-align: right; font-weight: 700;">₹ 1,500</td>
-          </tr>
-          <tr>
-            <td>2</td>
-            <td><strong>Screen Guard</strong></td>
-            <td style="text-align: center;">20</td>
-            <td style="text-align: right;">₹ 50</td>
-            <td style="text-align: right; font-weight: 700;">₹ 1,000</td>
-          </tr>
+          ${(inv.items || []).map((item, idx) => `
+            <tr>
+              <td>${idx + 1}</td>
+              <td><strong>${item.description}</strong></td>
+              <td style="font-family: var(--font-mono); font-size: 0.75rem;">${item.imeiNumber || 'N/A'}</td>
+              <td style="text-align: center;">${item.quantity}</td>
+              <td style="text-align: right;">${formatCurrency(item.rate)}</td>
+              <td style="text-align: right; font-weight: 700;">${formatCurrency(item.amount)}</td>
+            </tr>
+          `).join('')}
         </tbody>
       </table>
 
       <div style="display: flex; justify-content: flex-end; margin-bottom: 16px;">
-        <div style="width: 220px; font-size: 0.82rem;">
+        <div style="width: 250px; font-size: 0.82rem;">
           <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
             <span>Subtotal</span>
-            <span>₹ 2,500</span>
+            <span>${formatCurrency(inv.subtotal)}</span>
           </div>
           <div style="display: flex; justify-content: space-between; margin-bottom: 4px; color: #64748b;">
             <span>GST (18%)</span>
-            <span>₹ 450</span>
+            <span>${formatCurrency(inv.gstAmount)}</span>
           </div>
           <div style="display: flex; justify-content: space-between; font-size: 1.1rem; font-weight: 800; border-top: 2px solid #e2e8f0; padding-top: 6px;">
-            <span>Total</span>
-            <span style="color: #2563eb;">₹ 2,950</span>
+            <span>Total Payable</span>
+            <span style="color: #2563eb;">${formatCurrency(inv.totalAmount)}</span>
           </div>
         </div>
       </div>
 
-      <div style="display: flex; justify-content: space-between; border-top: 1px dashed #cbd5e1; padding-top: 12px;">
-        <span style="font-size: 0.75rem; color: #64748b;">Thank you for your business!</span>
-        <div style="display: flex; gap: 6px;">
-          <button class="btn btn-secondary btn-sm" onclick="window.print()">🖨️ Print</button>
-          <button class="btn btn-whatsapp btn-sm" onclick="window.sendWhatsAppReminder('0987654321', 'Suresh Sharma', 'Sharma Traders', 2950, 'Immediate')">Share on WhatsApp</button>
+      <div style="display: flex; justify-content: space-between; border-top: 1px dashed #cbd5e1; padding-top: 12px; align-items: center;">
+        <span style="font-size: 0.75rem; color: #64748b;">Payment Mode: <strong>${inv.paymentMode}</strong> • Verified Tax Invoice</span>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn btn-secondary btn-sm" onclick="window.print()">🖨️ Print Bill</button>
+          <button class="btn btn-whatsapp btn-sm" onclick="window.sendWhatsAppReminder('${inv.customerPhone}', '${inv.customerName}', '${inv.shopName}', ${inv.totalAmount}, 'Immediate')">📲 Share via WhatsApp</button>
         </div>
       </div>
     </div>
@@ -1528,11 +1957,11 @@ async function renderBackup() {
   openModal(`Invoice Preview - ${inv.invoiceNumber}`, html);
 };
 
-(window as any).viewEmployeeAttendanceDetail = (name: string, checkIn: string, loc: string) => {
+(window as any).viewEmployeeAttendanceDetail = (name: string, checkIn: string, loc: string, status: string) => {
   openModal(`Attendance Details - ${name}`, `
     <div style="padding: 10px;">
       <h4 style="font-size: 1.1rem;">${name}</h4>
-      <p style="color: #64748b; font-size: 0.85rem; margin: 4px 0 14px;">Location: 📍 ${loc}</p>
+      <p style="color: #64748b; font-size: 0.85rem; margin: 4px 0 14px;">Punch Location: 📍 ${loc}</p>
       <div style="background: #f8fafc; padding: 14px; border-radius: 8px; border: 1px solid #e2e8f0;">
         <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
           <span>Check-in Time:</span>
@@ -1540,51 +1969,104 @@ async function renderBackup() {
         </div>
         <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
           <span>Status:</span>
-          <span class="status-pill status-present">Present (On Duty)</span>
+          <span class="status-pill ${status === 'present' ? 'status-present' : 'status-absent'}">${status.toUpperCase()}</span>
         </div>
         <div style="display: flex; justify-content: space-between;">
-          <span>Today's Store Visits:</span>
-          <strong>5 Visits Completed</strong>
+          <span>Zone:</span>
+          <strong>Noida & NCR Field Distribution</strong>
         </div>
       </div>
     </div>
   `);
 };
 
-(window as any).exportAttendanceCSV = () => {
-  const csv = "Employee,Check-in,Check-out,Location,Status\nRohit Kumar,09:08 AM,06:12 PM,MP Nagar,Present\nAmit Singh,09:12 AM,06:01 PM,Kolar Road,Present\nSandeep Yadav,--,--,--,Absent\nNeha Verma,09:10 AM,06:20 PM,Ayodhya Bypass,Present\nRajesh Patel,09:15 AM,06:05 PM,Arera Colony,Present";
+(window as any).exportAttendanceCSV = async () => {
+  const records = await api.getAttendance('all');
+  let csv = "Employee,Date,Check-in,Check-out,Location,Status\n";
+  records.forEach(r => {
+    csv += `"${r.staffName}","${r.date}","${r.punchInTime}","${r.punchOutTime || ''}","${r.punchInLocation}","${r.status}"\n`;
+  });
   const blob = new Blob([csv], { type: 'text/csv' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'attendance-report.csv';
+  a.download = 'sam-mobile-noida-attendance.csv';
   a.click();
   showToast('Attendance CSV exported!', '📥');
 };
 
-(window as any).exportCollectionsCSV = () => {
-  const csv = "Date,Party,Amount,Type,Reference,Status\n11 Oct 2026,Sharma Traders,25000,UPI,UTR123456,Verified\n11 Oct 2026,Gupta Mobile Store,15000,Cash,CASH-098,Verified\n10 Oct 2026,Jain Electronics,20000,UPI,UTR987654,Verified";
+(window as any).exportCollectionsCSV = async () => {
+  const payments = await api.getPayments();
+  let csv = "Date,Party,Amount,Type,Reference,CollectedBy\n";
+  payments.forEach(p => {
+    csv += `"${p.date}","${p.shopName}",${p.amount},"${p.paymentMode}","${p.transactionRef}","${p.collectedBy}"\n`;
+  });
   const blob = new Blob([csv], { type: 'text/csv' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'collections-report.csv';
+  a.download = 'sam-mobile-noida-collections.csv';
   a.click();
   showToast('Collections CSV exported!', '📥');
 };
 
 function openQuickPunchModal() {
   openModal('⏱️ Quick Punch Action', `
-    <div style="text-align: center; padding: 10px;">
-      <p style="color: #64748b; font-size: 0.85rem; margin-bottom: 14px;">Select Employee to punch in/out</p>
-      <select class="form-select" id="quick-punch-emp" style="margin-bottom: 16px;">
-        ${cachedStaff.map(s => `<option value="${s.name}">${s.name}</option>`).join('')}
-      </select>
-      <div style="display: flex; gap: 10px;">
-        <button class="btn btn-primary" style="flex: 1;" onclick="showToast('Punch In Successful!'); document.getElementById('modal-close-btn').click();">🟢 Punch In</button>
-        <button class="btn btn-secondary" style="flex: 1;" onclick="showToast('Punch Out Successful!'); document.getElementById('modal-close-btn').click();">🔴 Punch Out</button>
+    <form onsubmit="event.preventDefault(); window.submitQuickPunch();" style="padding: 10px;">
+      <div class="form-group">
+        <label class="form-label">Select Employee *</label>
+        <select class="form-select" id="qp-emp">
+          ${cachedStaff.map(s => `<option value="${s.id}" data-name="${s.name}">${s.name}</option>`).join('')}
+        </select>
       </div>
-    </div>
+      <div class="form-group">
+        <label class="form-label">Punch Type *</label>
+        <select class="form-select" id="qp-type">
+          <option value="in">🟢 Check In (Punch In)</option>
+          <option value="out">🔴 Check Out (Punch Out)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Location</label>
+        <input type="text" id="qp-loc" class="form-input" value="Sector 18, Atta Market, Noida">
+      </div>
+      <button type="submit" class="btn btn-primary" style="width: 100%; padding: 12px; margin-top: 8px;">Save Attendance Punch</button>
+    </form>
   `);
 }
+
+(window as any).submitQuickPunch = async () => {
+  const empSelect = document.getElementById('qp-emp') as HTMLSelectElement;
+  const staffId = empSelect.value;
+  const staffName = empSelect.options[empSelect.selectedIndex].getAttribute('data-name') || 'Staff';
+  const type = (document.getElementById('qp-type') as HTMLSelectElement).value;
+  const loc = (document.getElementById('qp-loc') as HTMLInputElement).value || 'Sector 18, Noida';
+  const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+  if (type === 'in') {
+    await api.recordPunchIn({
+      id: 'ATT-' + Date.now(),
+      staffId: staffId,
+      staffName: staffName,
+      date: '2026-10-11',
+      punchInTime: time,
+      punchInLocation: loc,
+      status: 'present',
+      photoUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150'
+    });
+    showToast(`Punch In recorded for ${staffName}!`, '🟢');
+  } else {
+    const records = await api.getAttendance('all');
+    const existing = records.find(r => r.staffId === staffId);
+    if (existing) {
+      await api.recordPunchOut(existing.id, time, loc);
+      showToast(`Punch Out recorded for ${staffName}!`, '🔴');
+    } else {
+      showToast(`No active check-in found for ${staffName}`, '⚠️');
+    }
+  }
+
+  closeModal();
+  await renderAttendance();
+};
 
 function openAddPartyModal() {
   openModal('👤 Add New Retailer / Party', `
@@ -1602,8 +2084,22 @@ function openAddPartyModal() {
         <input type="text" id="np-phone" class="form-input" required placeholder="0987654321">
       </div>
       <div class="form-group">
-        <label class="form-label">Customer Biodata (Background / Habits) *</label>
-        <textarea id="np-bio" class="form-textarea" rows="2" placeholder="Credit history, preferred payment mode..."></textarea>
+        <label class="form-label">Address in Noida / NCR *</label>
+        <input type="text" id="np-addr" class="form-input" required placeholder="Shop 15, Sector 18, Noida">
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Initial Balance (₹)</label>
+          <input type="number" id="np-bal" class="form-input" value="0">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Credit Limit (₹)</label>
+          <input type="number" id="np-limit" class="form-input" value="100000">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Customer Biodata & Retail History *</label>
+        <textarea id="np-bio" class="form-textarea" rows="2" placeholder="Credit history, preferred payment mode, daily stock demand..."></textarea>
       </div>
       <button type="submit" class="btn btn-primary" style="width: 100%; padding: 10px;">Save Party</button>
     </form>
@@ -1616,44 +2112,74 @@ function openAddPartyModal() {
     shopName: (document.getElementById('np-shop') as HTMLInputElement).value,
     name: (document.getElementById('np-name') as HTMLInputElement).value,
     phone: (document.getElementById('np-phone') as HTMLInputElement).value,
-    address: 'MP Nagar, Bhopal',
+    address: (document.getElementById('np-addr') as HTMLInputElement).value || 'Sector 18, Noida',
     biodata: (document.getElementById('np-bio') as HTMLTextAreaElement).value,
-    creditLimit: 100000,
-    currentBalance: 0,
+    creditLimit: Number((document.getElementById('np-limit') as HTMLInputElement).value) || 100000,
+    currentBalance: Number((document.getElementById('np-bal') as HTMLInputElement).value) || 0,
     duePaymentDate: 'Active',
     photoUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=200'
   };
   await api.addParty(newParty);
   closeModal();
   showToast(`Party ${newParty.shopName} added successfully!`, '👤');
-  renderParties();
+  await renderParties();
 };
 
 (window as any).openDirectPaymentModal = () => {
   openModal('💰 Record Collection (UPI or Cash)', `
-    <form onsubmit="event.preventDefault(); showToast('Payment recorded!'); document.getElementById('modal-close-btn').click();">
+    <form onsubmit="event.preventDefault(); window.submitDirectPayment();">
       <div class="form-group">
-        <label class="form-label">Select Party</label>
-        <select class="form-select">
-          ${cachedParties.map(p => `<option>${p.shopName} (${p.name}) - Due: ${formatCurrency(p.currentBalance)}</option>`).join('')}
+        <label class="form-label">Select Party *</label>
+        <select class="form-select" id="dp-party">
+          ${cachedParties.map(p => `<option value="${p.id}">${p.shopName} (${p.name}) - Due: ${formatCurrency(p.currentBalance)}</option>`).join('')}
         </select>
       </div>
       <div class="form-row">
         <div class="form-group">
-          <label class="form-label">Amount (₹)</label>
-          <input type="number" class="form-input" value="25000">
+          <label class="form-label">Amount (₹) *</label>
+          <input type="number" id="dp-amt" class="form-input" value="25000" min="1" required>
         </div>
         <div class="form-group">
-          <label class="form-label">Mode</label>
-          <select class="form-select">
-            <option>UPI</option>
-            <option>Cash</option>
+          <label class="form-label">Mode *</label>
+          <select id="dp-mode" class="form-select">
+            <option value="UPI">UPI</option>
+            <option value="CASH">Cash</option>
           </select>
         </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Transaction / UTR Reference</label>
+        <input type="text" id="dp-ref" class="form-input" value="UTR${Math.floor(10000000 + Math.random() * 90000000)}">
       </div>
       <button type="submit" class="btn btn-primary" style="width: 100%; padding: 10px;">Save Collection</button>
     </form>
   `);
+};
+
+(window as any).submitDirectPayment = async () => {
+  const partySelect = document.getElementById('dp-party') as HTMLSelectElement;
+  const partyId = partySelect.value;
+  const party = cachedParties.find(p => p.id === partyId) || cachedParties[0];
+  const amt = Number((document.getElementById('dp-amt') as HTMLInputElement).value) || 25000;
+  const mode = (document.getElementById('dp-mode') as HTMLSelectElement).value as any;
+  const ref = (document.getElementById('dp-ref') as HTMLInputElement).value || 'UTR' + Date.now();
+
+  await api.addPayment({
+    id: 'PAY-' + Date.now(),
+    customerId: party.id,
+    customerName: party.name,
+    shopName: party.shopName,
+    amount: amt,
+    paymentMode: mode,
+    transactionRef: ref,
+    date: '11 Oct 2026',
+    collectedBy: 'Rohit Kumar',
+    notes: 'Direct collection receipt'
+  });
+
+  closeModal();
+  showToast(`Collection of ${formatCurrency(amt)} recorded & ledger updated!`, '💰');
+  await renderCollections();
 };
 
 // Global search handling
@@ -1684,7 +2210,7 @@ function setupGlobalSearch() {
         </div>
       `).join('')}
       ${matchesStaff.map(s => `
-        <div class="search-dropdown-item" onclick="window.switchView('tracking'); window.focusOnEmployee('${s.name}', 23.2332, 77.4343); document.getElementById('search-results-dropdown').classList.add('hidden');">
+        <div class="search-dropdown-item" onclick="window.switchView('tracking'); window.focusOnEmployee('${s.name}', 28.5708, 77.3271, 'Sector 18, Noida'); document.getElementById('search-results-dropdown').classList.add('hidden');">
           <div>
             <strong>👤 ${s.name}</strong> <small style="color: #64748b;">(Field Executive)</small>
           </div>
@@ -1726,10 +2252,29 @@ function initApp() {
         <h4>Amit Sharma</h4>
         <p style="color: #64748b; font-size: 0.8rem;">General Manager / Admin • SAM MOBILE</p>
         <div style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid #e2e8f0; margin: 16px 0; text-align: left; font-size: 0.82rem;">
-          <div>Zone: <strong>Bhopal & NCR Operations</strong></div>
+          <div>Zone: <strong>Noida & NCR Handset Operations</strong></div>
+          <div>Head Office: <strong>Sector 18, Noida - 201301</strong></div>
           <div>Contact: <strong>9300035900</strong></div>
-          <div>Active Staff on Field: <strong>20 Present</strong></div>
+          <div>Field Team: <strong>6 Active Field Sales Agents</strong></div>
         </div>
+      </div>
+    `);
+  });
+
+  document.getElementById('help-btn')?.addEventListener('click', () => {
+    openModal('ℹ️ SAM MOBILE Help & User Guide', `
+      <div style="font-size: 0.85rem; line-height: 1.5;">
+        <h4 style="color: #2563eb; margin-bottom: 8px;">SAM MOBILE Field Sales & Distribution ERP</h4>
+        <p style="color: #64748b; margin-bottom: 12px;">This platform manages on-ground sales executives, live GPS tracking, store visit verification, customer party biodata, handset billing with IMEI numbers, and collection reconciliation.</p>
+        <ul style="padding-left: 20px; color: #334155;">
+          <li><strong>Attendance:</strong> Quick punch in/out with live time & location.</li>
+          <li><strong>Live Tracking:</strong> Real-time map with satellite layer and route paths.</li>
+          <li><strong>Store Visits:</strong> Camera photo attachments and verified visit checkboxes.</li>
+          <li><strong>Parties / CRM:</strong> 1-Click WhatsApp payment reminders with pre-filled UPI links.</li>
+          <li><strong>Invoices:</strong> Billing engine with 15-digit IMEI tracking and GST 18%.</li>
+          <li><strong>Collections:</strong> UPI vs Cash real-time registers.</li>
+          <li><strong>Settings:</strong> Offline IndexedDB and Express Backend sync.</li>
+        </ul>
       </div>
     `);
   });
