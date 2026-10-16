@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SAM MOBILE - Field Operations & Retail ERP</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+  <link rel="stylesheet" href="/src/styles/main.css" />
+</head>
+<body>
+  <div id="app" class="app-layout">
+    <!-- Dark Navy Sidebar (Exact Match to Screenshot) -->
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-logo">
+          <span>SA</span>
+        </div>
+        <div class="brand-text">
+          <h2>SAM MOBILE</h2>
+        </div>
+      </div>
+
+      <nav class="nav-links">
+        <button class="nav-item active" data-view="dashboard">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect></svg>
+          <span>Dashboard</span>
+        </button>
+        <button class="nav-item" data-view="attendance">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+          <span>Attendance</span>
+        </button>
+        <button class="nav-item" data-view="tracking">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="3 11 22 2 13 21 11 13 3 11"></polygon></svg>
+          <span>Live Tracking</span>
+        </button>
+        <button class="nav-item" data-view="visits">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
+          <span>Store Visits</span>
+        </button>
+        <button class="nav-item" data-view="parties">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
+          <span>Parties / Customers</span>
+        </button>
+        <button class="nav-item" data-view="invoices">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
+          <span>Invoices</span>
+        </button>
+        <button class="nav-item" data-view="collections">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"></rect><line x1="2" y1="10" x2="22" y2="10"></line></svg>
+          <span>Collections</span>
+        </button>
+        <button class="nav-item" data-view="reports">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>
+          <span>Reports</span>
+        </button>
+        <button class="nav-item" data-view="mobile_screens">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="2" width="14" height="20" rx="3" ry="3"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>
+          <span>Mobile App (Employee)</span>
+        </button>
+        <button class="nav-item" data-view="backup">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+          <span>Settings & DB</span>
+        </button>
+      </nav>
+
+      <!-- Sidebar Bottom Account Card -->
+      <div class="sidebar-user-card" id="sidebar-account-btn">
+        <div class="user-avatar-circle">PK</div>
+        <div class="user-info">
+          <div class="user-name">Sharma Traders</div>
+          <div class="user-role">Business Account</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Container -->
+    <main class="main-container">
+      <!-- Topbar Header -->
+      <header class="topbar">
+        <div class="topbar-search-wrapper">
+          <div class="topbar-search">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" stroke-width="2"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+            <input type="text" id="global-search" placeholder="Search customers, invoices, employees, stores..." autocomplete="off" />
+          </div>
+          <!-- Live Instant Search Dropdown Results -->
+          <div id="search-results-dropdown" class="search-dropdown hidden"></div>
+        </div>
+
+        <div class="topbar-actions">
+          <div class="action-dropdown-anchor">
+            <button class="topbar-icon-btn" id="notifications-bell-btn" title="Notifications">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
+              <span class="icon-badge">3</span>
+            </button>
+            <!-- Notifications Popover -->
+            <div id="notifications-popover" class="popover-dropdown hidden">
+              <div class="popover-header">
+                <h4>Notifications</h4>
+                <span class="badge badge-primary">3 New</span>
+              </div>
+              <div class="popover-list">
+                <div class="popover-item unread">
+                  <span class="popover-icon" style="background:#eff6ff; color:#2563eb;">📍</span>
+                  <div>
+                    <p><strong>Rohit Kumar</strong> submitted store visit at MP Nagar, Bhopal</p>
+                    <small>12 mins ago</small>
+                  </div>
+                </div>
+                <div class="popover-item unread">
+                  <span class="popover-icon" style="background:#ecfdf5; color:#10b981;">💰</span>
+                  <div>
+                    <p>Payment received from <strong>Sharma Traders</strong> ₹ 25,000 (UPI)</p>
+                    <small>45 mins ago</small>
+                  </div>
+                </div>
+                <div class="popover-item unread">
+                  <span class="popover-icon" style="background:#fef2f2; color:#ef4444;">⏰</span>
+                  <div>
+                    <p>Payment overdue alert: <strong>Jain Electronics</strong> ₹ 1,20,000</p>
+                    <small>2 hours ago</small>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <button class="topbar-icon-btn" id="help-btn" title="Help / Documentation">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+          </button>
+
+          <div class="topbar-profile" id="user-profile-btn" style="cursor: pointer;">
+            <img src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100" alt="Admin" class="profile-img" />
+            <div class="profile-text">
+              <span class="profile-name">Amit Sharma</span>
+              <span class="profile-role">Admin</span>
+            </div>
+          </div>
+        </div>
+      </header>
+
+      <!-- View Content injected dynamically -->
+      <div class="view-content" id="view-content"></div>
+    </main>
+  </div>
+
+  <!-- Shared Modal Container -->
+  <div id="modal-container" class="modal-overlay hidden">
+    <div class="modal-card" id="modal-card">
+      <div class="modal-header">
+        <h3 id="modal-title">Modal Title</h3>
+        <button id="modal-close-btn" class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
