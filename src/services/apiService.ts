@@ -189,6 +189,22 @@ class ApiService {
     return localDb.addParty(party);
   }
 
+  async updateParty(party: CustomerParty): Promise<CustomerParty> {
+    if (this.mode === 'backend_api') {
+      try {
+        const res = await fetch(`${this.backendBaseUrl}/parties/${party.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(party)
+        });
+        if (res.ok) return await res.json();
+      } catch (err) {
+        console.warn('Backend update party failed', err);
+      }
+    }
+    return localDb.put<CustomerParty>('parties', party);
+  }
+
   async getInvoices(): Promise<Invoice[]> {
     if (this.mode === 'backend_api') {
       try {

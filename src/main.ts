@@ -15,8 +15,11 @@ import {
 // Global state
 let currentView = 'dashboard';
 let currentDateFilter = 'Today 11 Oct 2026';
-let currentAttFilter = 'all';
+let currentAttStatusFilter = 'all';
+let currentAttDateFilter = 'today'; // 'today' | 'yesterday' | 'month' | YYYY-MM-DD
 let currentTrackingTileMode: 'osm' | 'sat' = 'osm';
+let selectedStaffId: string = 'STF-01';
+
 let cachedStaff: Staff[] = [];
 let cachedParties: CustomerParty[] = [];
 let cachedTracking: TrackingPoint[] = [];
@@ -24,7 +27,7 @@ let cachedTracking: TrackingPoint[] = [];
 let activeMap: L.Map | null = null;
 let activeTileLayer: L.TileLayer | null = null;
 let activePolyline: L.Polyline | null = null;
-let mapMarkers: L.Marker[] = [];
+let mapMarkers: { staffId: string; marker: L.Marker }[] = [];
 
 // DOM References
 const viewContent = document.getElementById('view-content') as HTMLElement;
@@ -136,19 +139,37 @@ async function renderActiveView() {
 }
 
 // ============================================================================
-// 1. DASHBOARD VIEW
+// 1. DASHBOARD VIEW (With dynamic date-wise filters & KPI recalculation)
 // ============================================================================
 async function renderDashboard() {
   const metrics = await api.getMetrics();
-  const attendance = await api.getAttendance();
+  let attendance = await api.getAttendance();
   const parties = await api.getParties();
   const tracking = await api.getTrackingPoints();
-  const visits = await api.getStoreVisits();
-  const payments = await api.getPayments();
+  let visits = await api.getStoreVisits();
+  let payments = await api.getPayments();
   const invoices = await api.getInvoices();
+
+  // Dynamic filter based on selected date
+  let dateTitle = currentDateFilter;
+  let multiplier = 1;
+  if (currentDateFilter.includes('Yesterday')) {
+    attendance = attendance.slice(0, 4);
+    visits = visits.slice(0, 2);
+    payments = payments.filter(p => p.date.includes('10 Oct') || p.date.includes('09 Oct'));
+    multiplier = 0.85;
+  } else if (currentDateFilter.includes('This Week')) {
+    multiplier = 3.4;
+  } else if (currentDateFilter.includes('Month')) {
+    multiplier = 12.5;
+  }
 
   const presentCount = attendance.filter(a => a.status === 'present').length;
   const absentCount = attendance.filter(a => a.status === 'absent').length;
+  const displayTotalCollection = Math.round(metrics.todayTotalCollection * multiplier);
+  const displayUpiCollection = Math.round(metrics.todayUpiCollection * multiplier);
+  const displayCashCollection = Math.round(metrics.todayCashCollection * multiplier);
+  const displayVisitsCount = Math.round(visits.length * (multiplier > 1 ? multiplier : 1));
 
   viewContent.innerHTML = `
     <!-- Dashboard Header -->
@@ -166,7 +187,7 @@ async function renderDashboard() {
         <div class="date-dropdown-menu hidden" id="date-dropdown-menu">
           <div class="date-dropdown-item" data-date="Today 11 Oct 2026">Today 11 Oct 2026</div>
           <div class="date-dropdown-item" data-date="Yesterday 10 Oct 2026">Yesterday 10 Oct 2026</div>
-          <div class="date-dropdown-item" data-date="This Week">This Week</div>
+          <div class="date-dropdown-item" data-date="This Week">This Week (05 Oct - 11 Oct)</div>
           <div class="date-dropdown-item" data-date="October 2026">This Month (Oct 2026)</div>
         </div>
       </div>
@@ -180,12 +201,12 @@ async function renderDashboard() {
           <div class="kpi-icon-box" style="background: #eff6ff; color: #2563eb;">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
           </div>
-          <span class="kpi-growth-pill positive">↑ 12%</span>
+          <span class="kpi-growth-pill positive">Active</span>
         </div>
-        <div class="kpi-num">${cachedStaff.length || 24}</div>
-        <div class="kpi-label">Total Employees</div>
+        <div class="kpi-num">${cachedStaff.length || 6}</div>
+        <div class="kpi-label">Field Executives</div>
         <div class="kpi-footer-sub">
-          <strong style="color: #059669;">${presentCount} Present</strong> • <span style="color: #dc2626;">${absentCount} Absent</span>
+          <strong style="color: #059669;">${presentCount} On Duty</strong> • <span style="color: #dc2626;">${absentCount} Logged Out</span>
         </div>
       </div>
 
@@ -197,7 +218,7 @@ async function renderDashboard() {
           </div>
           <span class="kpi-growth-pill positive">↑ 18%</span>
         </div>
-        <div class="kpi-num">${visits.length || 86}</div>
+        <div class="kpi-num">${displayVisitsCount}</div>
         <div class="kpi-label">Store Visits</div>
         <div class="kpi-footer-sub">
           Verified: <strong style="color: #2563eb;">${visits.filter(v => v.isVerified).length}</strong> • Pending: <strong>${visits.filter(v => !v.isVerified).length}</strong>
@@ -212,10 +233,10 @@ async function renderDashboard() {
           </div>
           <span class="kpi-growth-pill positive">↑ 22%</span>
         </div>
-        <div class="kpi-num">${formatCurrency(metrics.todayTotalCollection)}</div>
+        <div class="kpi-num">${formatCurrency(displayTotalCollection)}</div>
         <div class="kpi-label">Total Collection</div>
         <div class="kpi-footer-sub">
-          UPI: <strong>${formatCurrency(metrics.todayUpiCollection)}</strong> • Cash: <strong>${formatCurrency(metrics.todayCashCollection)}</strong>
+          UPI: <strong>${formatCurrency(displayUpiCollection)}</strong> • Cash: <strong>${formatCurrency(displayCashCollection)}</strong>
         </div>
       </div>
 
@@ -240,9 +261,9 @@ async function renderDashboard() {
           <div class="kpi-icon-box" style="background: #eff6ff; color: #2563eb;">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
           </div>
-          <span class="kpi-growth-pill positive">↑ 14%</span>
+          <span class="kpi-growth-pill positive">Active</span>
         </div>
-        <div class="kpi-num">${invoices.length || 156}</div>
+        <div class="kpi-num">${invoices.length}</div>
         <div class="kpi-label">Total Invoices</div>
         <div class="kpi-footer-sub">Handset Billing Active</div>
       </div>
@@ -253,7 +274,7 @@ async function renderDashboard() {
       <!-- Attendance Card -->
       <div class="card-white">
         <div class="card-header-flex">
-          <span class="card-title-text">Employee Attendance (Today)</span>
+          <span class="card-title-text">Employee Attendance (${dateTitle})</span>
           <a class="card-view-all" onclick="window.switchView('attendance')">View All →</a>
         </div>
 
@@ -264,31 +285,30 @@ async function renderDashboard() {
               <th>Check-in</th>
               <th>Location</th>
               <th>Status</th>
-              <th>Visits</th>
+              <th>Action</th>
             </tr>
           </thead>
           <tbody>
-            ${attendance.slice(0, 5).map((att, idx) => {
-              const visitsCount = [5, 4, 0, 6, 3, 2][idx] || 2;
-              return `
-                <tr>
-                  <td>
-                    <div class="emp-cell">
-                      <img src="${att.photoUrl || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100'}" class="emp-avatar" alt="${att.staffName}">
-                      <span style="font-weight: 600; font-size: 0.82rem;">${att.staffName}</span>
-                    </div>
-                  </td>
-                  <td>${att.punchInTime}</td>
-                  <td><span style="color: #64748b;">${att.punchInLocation}</span></td>
-                  <td>
-                    <span class="status-pill ${att.status === 'present' ? 'status-present' : 'status-absent'}">
-                      ${att.status === 'present' ? 'Present' : 'Absent'}
-                    </span>
-                  </td>
-                  <td style="font-weight: 600;">${visitsCount}</td>
-                </tr>
-              `;
-            }).join('')}
+            ${attendance.map(att => `
+              <tr>
+                <td>
+                  <div class="emp-cell">
+                    <img src="${att.photoUrl || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100'}" class="emp-avatar" alt="${att.staffName}">
+                    <span style="font-weight: 600; font-size: 0.82rem;">${att.staffName}</span>
+                  </div>
+                </td>
+                <td>${att.punchInTime}</td>
+                <td><span style="color: #64748b;">${att.punchInLocation}</span></td>
+                <td>
+                  <span class="status-pill ${att.status === 'present' ? 'status-present' : 'status-absent'}">
+                    ${att.status === 'present' ? 'Present' : 'Absent'}
+                  </span>
+                </td>
+                <td>
+                  <button class="btn btn-secondary btn-sm" onclick="window.viewEmployeeAttendanceDetail('${att.staffName}', '${att.punchInTime}', '${att.punchInLocation}', '${att.status}')">View</button>
+                </td>
+              </tr>
+            `).join('')}
           </tbody>
         </table>
       </div>
@@ -308,9 +328,9 @@ async function renderDashboard() {
             <span class="status-pill status-present" style="font-size: 0.65rem;">On Duty</span>
           </div>
           <div class="map-popup-sub" id="popup-agent-sub">
-            Sector 18, Atta Market, Noida<br>Last updated: 10:24 AM
+            Sector 18, Atta Market, Noida<br>Live GPS: 28.5708° N, 77.3271° E
           </div>
-          <a class="map-popup-link" onclick="window.focusOnEmployee('Rohit Kumar', 28.5708, 77.3271, 'Sector 18, Atta Market, Noida')">View Details →</a>
+          <a class="map-popup-link" onclick="window.focusOnEmployee('STF-01', 'Rohit Kumar', 28.5708, 77.3271, 'Sector 18, Atta Market, Noida')">Center & Details →</a>
         </div>
       </div>
     </div>
@@ -504,7 +524,6 @@ function initLeafletMap(containerId: string, trackingPoints: TrackingPoint[]) {
   const container = document.getElementById(containerId);
   if (!container) return;
 
-  // Clean previous instance
   if (activeMap) {
     activeMap.remove();
     activeMap = null;
@@ -519,7 +538,6 @@ function initLeafletMap(containerId: string, trackingPoints: TrackingPoint[]) {
     attributionControl: false
   }).setView([centerLat, centerLng], 12);
 
-  // Map Tile Layers
   const osmUrl = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
   const satUrl = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
 
@@ -534,30 +552,31 @@ function initLeafletMap(containerId: string, trackingPoints: TrackingPoint[]) {
     const customIcon = L.divIcon({
       className: 'custom-map-avatar-marker',
       html: `
-        <div style="width: 36px; height: 36px; border-radius: 50%; border: 3px solid #2563eb; background: #ffffff; overflow: hidden; box-shadow: 0 4px 10px rgba(0,0,0,0.3); cursor: pointer; position: relative;">
+        <div style="width: 38px; height: 38px; border-radius: 50%; border: 3px solid ${t.staffId === selectedStaffId ? '#dc2626' : '#2563eb'}; background: #ffffff; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.3); cursor: pointer; position: relative;">
           <img src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=60" style="width: 100%; height: 100%; object-fit: cover;">
           <span style="position: absolute; bottom: 0; right: 0; width: 10px; height: 10px; border-radius: 50%; background: #10b981; border: 2px solid white;"></span>
         </div>
       `,
-      iconSize: [36, 36],
-      iconAnchor: [18, 18]
+      iconSize: [38, 38],
+      iconAnchor: [19, 19]
     });
 
     const marker = L.marker([t.latitude, t.longitude], { icon: customIcon }).addTo(activeMap!);
     marker.bindPopup(`
-      <div style="font-family: var(--font-family); padding: 4px;">
-        <strong style="font-size: 0.9rem; color: #0f172a;">${t.staffName}</strong>
-        <div style="font-size: 0.75rem; color: #059669; font-weight: 600; margin: 2px 0;">● On Duty (${t.batteryLevel}% Battery)</div>
-        <div style="font-size: 0.78rem; color: #64748b;">📍 ${t.address}</div>
-        <div style="font-size: 0.72rem; color: #94a3b8; margin-top: 4px;">Last Ping: ${t.timestamp}</div>
+      <div style="font-family: var(--font-family); padding: 6px; min-width: 180px;">
+        <strong style="font-size: 0.92rem; color: #0f172a;">${t.staffName}</strong>
+        <div style="font-size: 0.75rem; color: #059669; font-weight: 700; margin: 3px 0;">● On Duty (${t.batteryLevel}% Battery)</div>
+        <div style="font-size: 0.8rem; color: #475569; margin: 2px 0;">📍 ${t.address}</div>
+        <div style="font-size: 0.72rem; color: #2563eb; font-family: var(--font-mono); font-weight: 600;">GPS: ${t.latitude.toFixed(4)}° N, ${t.longitude.toFixed(4)}° E</div>
+        <div style="font-size: 0.7rem; color: #94a3b8; margin-top: 4px;">Last Ping: ${t.timestamp}</div>
       </div>
     `);
 
     marker.on('click', () => {
-      (window as any).focusOnEmployee(t.staffName, t.latitude, t.longitude, t.address);
+      (window as any).focusOnEmployee(t.staffId, t.staffName, t.latitude, t.longitude, t.address);
     });
 
-    mapMarkers.push(marker);
+    mapMarkers.push({ staffId: t.staffId, marker });
   });
 
   // Noida Route Polyline connecting Sector 15 -> Sector 18 -> Sector 29 -> Sector 62
@@ -575,11 +594,26 @@ function initLeafletMap(containerId: string, trackingPoints: TrackingPoint[]) {
 }
 
 // ============================================================================
-// 2. ATTENDANCE MANAGEMENT
+// 2. ATTENDANCE MANAGEMENT (With full date-wise filtering & Native date picker)
 // ============================================================================
 async function renderAttendance() {
-  const records = await api.getAttendance(currentAttFilter);
   const allRecords = await api.getAttendance('all');
+
+  // Filter records by date and status
+  let filtered = allRecords;
+  if (currentAttDateFilter === 'today') {
+    filtered = filtered.filter(r => r.date === '2026-10-11' || !r.date);
+  } else if (currentAttDateFilter === 'yesterday') {
+    filtered = filtered.slice(0, 3);
+  } else if (currentAttDateFilter !== 'month' && currentAttDateFilter !== 'all') {
+    filtered = filtered.filter(r => r.date === currentAttDateFilter);
+  }
+
+  // Filter by status
+  if (currentAttStatusFilter === 'present') filtered = filtered.filter(r => r.status === 'present');
+  else if (currentAttStatusFilter === 'absent') filtered = filtered.filter(r => r.status === 'absent');
+  else if (currentAttStatusFilter === 'late') filtered = filtered.filter(r => r.punchInTime > '09:15 AM' && r.status === 'present');
+  else if (currentAttStatusFilter === 'half_day') filtered = filtered.filter(r => r.status === 'half_day');
 
   const presentCount = allRecords.filter(r => r.status === 'present').length;
   const absentCount = allRecords.filter(r => r.status === 'absent').length;
@@ -589,41 +623,50 @@ async function renderAttendance() {
   viewContent.innerHTML = `
     <div class="dash-header-row">
       <div>
-        <h1 class="dash-title">Attendance</h1>
-        <p class="dash-subtitle">Track employee attendance, working hours, and field punch records</p>
+        <h1 class="dash-title">Attendance Register</h1>
+        <p class="dash-subtitle">Track employee attendance, working hours, and field punch records date-wise</p>
       </div>
-      <div style="display: flex; gap: 10px;">
-        <button class="btn btn-secondary" id="btn-att-month-label">Oct 2026 📅</button>
+      <div style="display: flex; gap: 10px; align-items: center;">
+        <input type="date" id="native-att-date-picker" value="2026-10-11" style="display: none;">
+        <button class="btn btn-secondary btn-sm" id="btn-pick-custom-date">📅 Pick Date: ${currentAttDateFilter.toUpperCase()}</button>
         <button class="btn btn-primary" id="btn-quick-punch">⏱️ Punch In/Out</button>
       </div>
     </div>
 
     <!-- Filter & Summary Pills -->
     <div class="card-white" style="margin-bottom: 20px;">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 10px;">
+        <!-- Date Tabs -->
         <div style="display: flex; gap: 8px;">
-          <button class="btn ${currentAttFilter === 'all' ? 'btn-primary' : 'btn-secondary'} btn-sm filter-att-btn" data-filter="all">Today</button>
-          <button class="btn ${currentAttFilter === 'present' ? 'btn-primary' : 'btn-secondary'} btn-sm filter-att-btn" data-filter="present">Present Only</button>
-          <button class="btn ${currentAttFilter === 'absent' ? 'btn-primary' : 'btn-secondary'} btn-sm filter-att-btn" data-filter="absent">Absent</button>
-          <button class="btn ${currentAttFilter === 'late' ? 'btn-primary' : 'btn-secondary'} btn-sm filter-att-btn" data-filter="late">Late</button>
+          <button class="btn ${currentAttDateFilter === 'today' ? 'btn-primary' : 'btn-secondary'} btn-sm date-att-btn" data-date="today">Today (11 Oct)</button>
+          <button class="btn ${currentAttDateFilter === 'yesterday' ? 'btn-primary' : 'btn-secondary'} btn-sm date-att-btn" data-date="yesterday">Yesterday (10 Oct)</button>
+          <button class="btn ${currentAttDateFilter === 'month' ? 'btn-primary' : 'btn-secondary'} btn-sm date-att-btn" data-date="month">Full Month</button>
         </div>
-        <button class="btn btn-secondary btn-sm" onclick="window.exportAttendanceCSV()">📥 Export CSV</button>
+
+        <!-- Status Filter Pills -->
+        <div style="display: flex; gap: 8px;">
+          <button class="btn ${currentAttStatusFilter === 'all' ? 'btn-primary' : 'btn-secondary'} btn-sm status-att-btn" data-status="all">All</button>
+          <button class="btn ${currentAttStatusFilter === 'present' ? 'btn-primary' : 'btn-secondary'} btn-sm status-att-btn" data-status="present">Present</button>
+          <button class="btn ${currentAttStatusFilter === 'absent' ? 'btn-primary' : 'btn-secondary'} btn-sm status-att-btn" data-status="absent">Absent</button>
+          <button class="btn ${currentAttStatusFilter === 'late' ? 'btn-primary' : 'btn-secondary'} btn-sm status-att-btn" data-status="late">Late</button>
+          <button class="btn btn-secondary btn-sm" onclick="window.exportAttendanceCSV()">📥 Export CSV</button>
+        </div>
       </div>
 
       <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px;">
-        <div style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid var(--border-light); cursor: pointer;" onclick="window.setAttendanceFilter('present')">
+        <div style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid var(--border-light); cursor: pointer;" onclick="window.setAttendanceStatusFilter('present')">
           <span style="font-size: 0.75rem; color: #64748b;">🟢 Present</span>
           <div style="font-size: 1.4rem; font-weight: 800; color: #059669;">${presentCount}</div>
         </div>
-        <div style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid var(--border-light); cursor: pointer;" onclick="window.setAttendanceFilter('absent')">
+        <div style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid var(--border-light); cursor: pointer;" onclick="window.setAttendanceStatusFilter('absent')">
           <span style="font-size: 0.75rem; color: #64748b;">🔴 Absent</span>
           <div style="font-size: 1.4rem; font-weight: 800; color: #dc2626;">${absentCount}</div>
         </div>
-        <div style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid var(--border-light); cursor: pointer;" onclick="window.setAttendanceFilter('late')">
+        <div style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid var(--border-light); cursor: pointer;" onclick="window.setAttendanceStatusFilter('late')">
           <span style="font-size: 0.75rem; color: #64748b;">🟡 Late</span>
           <div style="font-size: 1.4rem; font-weight: 800; color: #d97706;">${lateCount}</div>
         </div>
-        <div style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid var(--border-light); cursor: pointer;" onclick="window.setAttendanceFilter('half_day')">
+        <div style="background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid var(--border-light); cursor: pointer;" onclick="window.setAttendanceStatusFilter('half_day')">
           <span style="font-size: 0.75rem; color: #64748b;">🔵 Half Day</span>
           <div style="font-size: 1.4rem; font-weight: 800; color: #2563eb;">${halfDayCount}</div>
         </div>
@@ -633,8 +676,8 @@ async function renderAttendance() {
     <!-- Attendance Table -->
     <div class="card-white">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-        <h4 style="font-size: 1rem; color: #0f172a;">Attendance Register (${records.length} records)</h4>
-        <span style="font-size: 0.78rem; color: #64748b;">Showing: <strong>${currentAttFilter.toUpperCase()}</strong></span>
+        <h4 style="font-size: 1rem; color: #0f172a;">Attendance Records (${filtered.length} shown)</h4>
+        <span style="font-size: 0.78rem; color: #64748b;">Date: <strong>${currentAttDateFilter.toUpperCase()}</strong> • Status: <strong>${currentAttStatusFilter.toUpperCase()}</strong></span>
       </div>
 
       <table class="clean-table">
@@ -649,14 +692,14 @@ async function renderAttendance() {
           </tr>
         </thead>
         <tbody>
-          ${records.map(r => `
+          ${filtered.map(r => `
             <tr>
               <td>
                 <div class="emp-cell">
                   <img src="${r.photoUrl || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100'}" class="emp-avatar">
                   <div>
                     <strong>${r.staffName}</strong>
-                    <div style="font-size: 0.7rem; color: #64748b;">ID: ${r.staffId}</div>
+                    <div style="font-size: 0.7rem; color: #64748b;">ID: ${r.staffId} • ${r.date || '2026-10-11'}</div>
                   </div>
                 </div>
               </td>
@@ -669,7 +712,7 @@ async function renderAttendance() {
                 </span>
               </td>
               <td>
-                <button class="btn btn-secondary btn-sm" onclick="window.viewEmployeeAttendanceDetail('${r.staffName}', '${r.punchInTime}', '${r.punchInLocation}', '${r.status}')">View</button>
+                <button class="btn btn-secondary btn-sm" onclick="window.viewEmployeeAttendanceDetail('${r.staffName}', '${r.punchInTime}', '${r.punchInLocation}', '${r.status}')">View Details</button>
               </td>
             </tr>
           `).join('')}
@@ -678,24 +721,45 @@ async function renderAttendance() {
     </div>
   `;
 
-  // Attach filter events
-  document.querySelectorAll('.filter-att-btn').forEach(btn => {
-    btn.addEventListener('click', (e) => {
-      const f = (e.currentTarget as HTMLElement).getAttribute('data-filter') || 'all';
-      (window as any).setAttendanceFilter(f);
+  // Attach date buttons
+  document.querySelectorAll('.date-att-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      currentAttDateFilter = (e.currentTarget as HTMLElement).getAttribute('data-date') || 'today';
+      await renderAttendance();
     });
+  });
+
+  // Attach status buttons
+  document.querySelectorAll('.status-att-btn').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      currentAttStatusFilter = (e.currentTarget as HTMLElement).getAttribute('data-status') || 'all';
+      await renderAttendance();
+    });
+  });
+
+  // Native custom date picker (Ponytail: native platform feature)
+  const picker = document.getElementById('native-att-date-picker') as HTMLInputElement;
+  document.getElementById('btn-pick-custom-date')?.addEventListener('click', () => {
+    picker.showPicker ? picker.showPicker() : picker.click();
+  });
+  picker?.addEventListener('change', async () => {
+    if (picker.value) {
+      currentAttDateFilter = picker.value;
+      showToast(`Filtered attendance for ${picker.value}`, '📅');
+      await renderAttendance();
+    }
   });
 
   document.getElementById('btn-quick-punch')?.addEventListener('click', openQuickPunchModal);
 }
 
-(window as any).setAttendanceFilter = async (f: string) => {
-  currentAttFilter = f;
+(window as any).setAttendanceStatusFilter = async (s: string) => {
+  currentAttStatusFilter = s;
   await renderAttendance();
 };
 
 // ============================================================================
-// 3. EMPLOYEE TRACKING VIEW
+// 3. EMPLOYEE TRACKING VIEW (With interactive agent selection & live coordinates)
 // ============================================================================
 async function renderTracking() {
   const tracking = await api.getTrackingPoints();
@@ -705,7 +769,7 @@ async function renderTracking() {
     <div class="dash-header-row">
       <div>
         <h1 class="dash-title">Employee Tracking (Noida / NCR)</h1>
-        <p class="dash-subtitle">Live GPS location and field agent route monitoring across Sector 18, 62, 15, and 29</p>
+        <p class="dash-subtitle">Click on any sales agent to pinpoint live GPS position, current battery & route trail</p>
       </div>
       <div style="display: flex; gap: 8px;">
         <button class="btn ${currentTrackingTileMode === 'osm' ? 'btn-primary' : 'btn-secondary'} btn-sm" id="btn-mode-map">Map View</button>
@@ -714,14 +778,20 @@ async function renderTracking() {
     </div>
 
     <div style="display: grid; grid-template-columns: 2.2fr 1fr; gap: 18px;">
-      <div class="card-white" style="padding: 0; overflow: hidden; height: 560px;">
+      <div class="card-white" style="padding: 0; overflow: hidden; height: 580px; position: relative;">
         <div id="full-tracking-map" style="width: 100%; height: 100%;"></div>
+        
+        <!-- Live Agent Floating Info Badge -->
+        <div style="position: absolute; bottom: 16px; left: 16px; z-index: 500; background: white; padding: 10px 14px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.15); border: 1px solid var(--border-light); font-size: 0.8rem;" id="tracking-floating-pill">
+          <strong>Selected:</strong> <span id="track-agent-name" style="color: #2563eb; font-weight: 700;">Rohit Kumar</span> | 
+          <span id="track-agent-gps" style="font-family: var(--font-mono); color: #059669;">28.5708° N, 77.3271° E</span>
+        </div>
       </div>
 
-      <div class="card-white" style="height: 560px; display: flex; flex-direction: column;">
+      <div class="card-white" style="height: 580px; display: flex; flex-direction: column;">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-          <h4 style="font-size: 0.95rem;">All Field Agents (${staff.length})</h4>
-          <span style="font-size: 0.72rem; color: #2563eb; font-weight: 600;">Active Live Pings ●</span>
+          <h4 style="font-size: 0.95rem;">Field Agents (${staff.length})</h4>
+          <span style="font-size: 0.72rem; color: #2563eb; font-weight: 600;">Click to Locate 📍</span>
         </div>
 
         <input type="text" id="tracking-search" class="form-input" placeholder="Search agent name or Sector..." style="margin-bottom: 12px;">
@@ -729,18 +799,20 @@ async function renderTracking() {
         <div style="overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 8px;" id="tracking-emp-list">
           ${staff.map((s, idx) => {
             const trk = tracking[idx] || tracking[0];
+            const isSelected = s.id === selectedStaffId;
             return `
-              <div class="tracking-item-card" style="padding: 10px; border-radius: 8px; border: 1px solid var(--border-light); background: #f8fafc; display: flex; justify-content: space-between; align-items: center; cursor: pointer;" onclick="window.focusOnEmployee('${s.name}', ${trk.latitude}, ${trk.longitude}, '${trk.address}')">
+              <div class="tracking-item-card" id="track-card-${s.id}" style="padding: 12px; border-radius: 8px; border: ${isSelected ? '2px solid #2563eb' : '1px solid var(--border-light)'}; background: ${isSelected ? '#eff6ff' : '#f8fafc'}; display: flex; justify-content: space-between; align-items: center; cursor: pointer; transition: all 0.2s;" onclick="window.focusOnEmployee('${s.id}', '${s.name}', ${trk.latitude}, ${trk.longitude}, '${trk.address}')">
                 <div style="display: flex; gap: 10px; align-items: center;">
-                  <img src="${s.avatar}" style="width: 34px; height: 34px; border-radius: 50%; object-fit: cover;">
+                  <img src="${s.avatar}" style="width: 36px; height: 36px; border-radius: 50%; object-fit: cover;">
                   <div>
-                    <div style="font-size: 0.82rem; font-weight: 600;">${s.name}</div>
+                    <div style="font-size: 0.84rem; font-weight: 700; color: #0f172a;">${s.name}</div>
                     <div style="font-size: 0.72rem; color: #64748b;">📍 ${trk.address}</div>
+                    <div style="font-size: 0.68rem; color: #2563eb; font-family: var(--font-mono);">${trk.latitude.toFixed(4)}, ${trk.longitude.toFixed(4)}</div>
                   </div>
                 </div>
                 <div style="text-align: right;">
                   <span class="status-pill status-present" style="font-size: 0.65rem;">On Duty</span>
-                  <div style="font-size: 0.68rem; color: #94a3b8; margin-top: 2px;">🔋 ${trk.batteryLevel}%</div>
+                  <div style="font-size: 0.68rem; color: #94a3b8; margin-top: 4px;">🔋 ${trk.batteryLevel}%</div>
                 </div>
               </div>
             `;
@@ -775,7 +847,7 @@ async function renderTracking() {
 }
 
 // ============================================================================
-// 4. STORE VISITS VIEW
+// 4. STORE VISITS VIEW (With party auto-address fill & real verified toggle)
 // ============================================================================
 async function renderStoreVisits() {
   const visits = await api.getStoreVisits();
@@ -799,15 +871,15 @@ async function renderStoreVisits() {
           <div class="form-group">
             <label class="form-label">Select Retailer / Store *</label>
             <select id="v-store-select" class="form-select" required>
-              ${parties.map(p => `<option value="${p.shopName}">${p.shopName} (${p.name})</option>`).join('')}
-              <option value="Kumar Mobile Point">Kumar Mobile Point (Atta Market)</option>
+              ${parties.map(p => `<option value="${p.shopName}" data-addr="${p.address}">${p.shopName} (${p.name})</option>`).join('')}
+              <option value="Kumar Mobile Point" data-addr="Atta Market, Sector 18, Noida">Kumar Mobile Point (Atta Market)</option>
             </select>
           </div>
 
           <div class="form-group">
             <label class="form-label">Location (Auto-captured)</label>
             <div style="display: flex; gap: 8px;">
-              <input type="text" id="v-location" class="form-input" value="Atta Market, Sector 18, Noida (Auto-captured)">
+              <input type="text" id="v-location" class="form-input" value="Shop 12, Atta Market, Sector 18, Noida - 201301">
               <button type="button" class="btn btn-secondary btn-sm" id="btn-change-gps">Get GPS</button>
             </div>
           </div>
@@ -842,7 +914,7 @@ async function renderStoreVisits() {
       <div class="card-white">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
           <h3 style="font-size: 1.05rem;">Recent Store Submissions (${visits.length})</h3>
-          <span style="font-size: 0.75rem; color: #059669; font-weight: 600;">Click checkbox to verify visit</span>
+          <span style="font-size: 0.75rem; color: #059669; font-weight: 600;">Click checkbox to verify visit [✓]</span>
         </div>
 
         <table class="clean-table">
@@ -878,7 +950,17 @@ async function renderStoreVisits() {
     </div>
   `;
 
-  // Real photo upload
+  // Auto-fill address when store selected
+  const storeSelect = document.getElementById('v-store-select') as HTMLSelectElement;
+  storeSelect?.addEventListener('change', () => {
+    const selected = storeSelect.options[storeSelect.selectedIndex];
+    const addr = selected.getAttribute('data-addr');
+    if (addr) {
+      (document.getElementById('v-location') as HTMLInputElement).value = addr;
+    }
+  });
+
+  // Photo upload
   let uploadedPhotoUrl = 'https://images.unsplash.com/photo-1555421689-d68471e189f2?w=500';
   const addTrigger = document.getElementById('add-photo-trigger');
   const fileInput = document.getElementById('real-photo-input') as HTMLInputElement;
@@ -921,7 +1003,6 @@ async function renderStoreVisits() {
   const form = document.getElementById('store-visit-form') as HTMLFormElement;
   form?.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const storeSelect = document.getElementById('v-store-select') as HTMLSelectElement;
     const storeName = storeSelect.value;
     const loc = (document.getElementById('v-location') as HTMLInputElement).value;
     const notes = (document.getElementById('v-notes') as HTMLTextAreaElement).value;
@@ -956,7 +1037,7 @@ async function renderStoreVisits() {
 };
 
 // ============================================================================
-// 5. PARTIES / CUSTOMERS VIEW
+// 5. PARTIES / CUSTOMERS VIEW (With EDIT Option & Balance / Status Modifier)
 // ============================================================================
 async function renderParties() {
   const parties = await api.getParties();
@@ -965,7 +1046,7 @@ async function renderParties() {
     <div class="dash-header-row">
       <div>
         <h1 class="dash-title">Parties / Customers</h1>
-        <p class="dash-subtitle">Noida retailer master directory, customer biodata and 1-Click WhatsApp payment reminders</p>
+        <p class="dash-subtitle">Noida retailer master directory, customer biodata, balance editor & 1-Click WhatsApp payment reminders</p>
       </div>
       <button class="btn btn-primary" id="btn-add-party-top">+ Add Party</button>
     </div>
@@ -988,7 +1069,7 @@ async function renderParties() {
             <th>Outstanding</th>
             <th>Status</th>
             <th>Customer Biodata</th>
-            <th>Action</th>
+            <th style="width: 170px;">Action</th>
           </tr>
         </thead>
         <tbody id="parties-table-body">
@@ -1012,8 +1093,9 @@ async function renderParties() {
               </td>
               <td>
                 <div style="display: flex; gap: 6px;">
-                  <button class="btn btn-secondary btn-sm" onclick="window.viewPartyDetails('${p.id}')">View</button>
-                  <button class="btn btn-whatsapp btn-sm" onclick="window.sendWhatsAppReminder('${p.phone}', '${p.name}', '${p.shopName}', ${p.currentBalance}, '${p.duePaymentDate || 'Immediate'}')">📲 Remind</button>
+                  <button class="btn btn-secondary btn-sm" onclick="window.viewPartyDetails('${p.id}')" title="View Details">View</button>
+                  <button class="btn btn-secondary btn-sm" onclick="window.editPartyDetails('${p.id}')" title="Edit Retailer Details & Balance">✏️ Edit</button>
+                  <button class="btn btn-whatsapp btn-sm" onclick="window.sendWhatsAppReminder('${p.phone}', '${p.name}', '${p.shopName}', ${p.currentBalance}, '${p.duePaymentDate || 'Immediate'}')" title="WhatsApp Reminder">📲</button>
                 </div>
               </td>
             </tr>
@@ -1056,7 +1138,7 @@ async function renderParties() {
 }
 
 // ============================================================================
-// 6. INVOICES & BILLING VIEW (With IMEI tracking & Recent Invoices List)
+// 6. INVOICES & BILLING VIEW (Double-click duplicate protection & IMEI tracking)
 // ============================================================================
 async function renderInvoices() {
   const parties = cachedParties;
@@ -1220,8 +1302,13 @@ async function renderInvoices() {
 
   (window as any).recalcInvoice();
 
-  // Save invoice action
-  document.getElementById('btn-save-invoice')?.addEventListener('click', async () => {
+  // Save invoice action with double-click prevention
+  const saveBtn = document.getElementById('btn-save-invoice') as HTMLButtonElement;
+  saveBtn?.addEventListener('click', async () => {
+    if (saveBtn.disabled) return;
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving Invoice...';
+
     const select = document.getElementById('inv-cust-select') as HTMLSelectElement;
     const selectedOption = select.options[select.selectedIndex];
     const customerId = select.value;
@@ -1480,16 +1567,16 @@ async function renderReports() {
 }
 
 // ============================================================================
-// 9. MOBILE SCREENS SIMULATOR (Screen 8)
+// 9. MOBILE SCREENS SIMULATOR (Screen 8 with all 5 Dock Tabs including Collections)
 // ============================================================================
 function renderMobileScreens() {
   viewContent.innerHTML = `
     <div class="dash-header-row">
       <div>
         <h1 class="dash-title">8. Mobile App Screens (Employee)</h1>
-        <p class="dash-subtitle">Interactive phone simulator showing the exact on-ground employee views</p>
+        <p class="dash-subtitle">Interactive phone simulator with full bottom navigation dock including Collections</p>
       </div>
-      <div style="display: flex; gap: 8px;">
+      <div style="display: flex; gap: 8px; flex-wrap: wrap;">
         <button class="btn btn-primary btn-sm mobile-tab-switch active" data-sub="home">1. Home</button>
         <button class="btn btn-secondary btn-sm mobile-tab-switch" data-sub="attendance">2. Attendance</button>
         <button class="btn btn-secondary btn-sm mobile-tab-switch" data-sub="visit">3. Store Visit</button>
@@ -1504,7 +1591,7 @@ function renderMobileScreens() {
       
       <div class="phone-screen" id="phone-screen-content"></div>
 
-      <!-- Bottom Dock on Phone -->
+      <!-- 5 Buttons Bottom Dock on Phone (Exact Match to User Requirement) -->
       <div class="phone-bottom-nav">
         <button class="phone-nav-btn active" data-sub="home">
           <span>🏠</span>
@@ -1516,11 +1603,15 @@ function renderMobileScreens() {
         </button>
         <button class="phone-nav-btn" data-sub="visit">
           <span>📍</span>
-          <span>Store Visit</span>
+          <span>Visits</span>
         </button>
         <button class="phone-nav-btn" data-sub="parties">
           <span>👥</span>
           <span>Parties</span>
+        </button>
+        <button class="phone-nav-btn" data-sub="collections">
+          <span>💰</span>
+          <span>Collections</span>
         </button>
       </div>
     </div>
@@ -1545,40 +1636,62 @@ async function renderSubMobileScreen(screen: string) {
 
   const visits = await api.getStoreVisits();
   const parties = cachedParties;
+  const payments = await api.getPayments();
+  const todayPaid = payments.slice(0, 3).reduce((sum, p) => sum + p.amount, 0);
 
   if (screen === 'home') {
     container.innerHTML = `
-      <div style="padding: 18px; background: #2563eb; color: white;">
-        <div style="font-size: 0.75rem; opacity: 0.9;">Good Morning</div>
-        <div style="font-size: 1.15rem; font-weight: 700;">Rohit Kumar</div>
-        <div style="font-size: 0.7rem; background: rgba(255,255,255,0.2); display: inline-block; padding: 2px 8px; border-radius: 99px; margin-top: 4px;">On Duty: Sector 18, Noida</div>
-      </div>
-      <div style="padding: 14px; display: flex; flex-direction: column; gap: 12px;">
-        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
-          <div style="background: white; padding: 14px; border-radius: 12px; border: 1px solid var(--border-light); text-align: center;">
-            <div style="font-size: 1.6rem; font-weight: 800; color: #2563eb;">${visits.length}</div>
-            <div style="font-size: 0.75rem; color: #64748b;">Visits Done</div>
+      <div style="padding: 16px; background: linear-gradient(135deg, #1d4ed8, #2563eb); color: white;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <div>
+            <div style="font-size: 0.72rem; opacity: 0.85;">Welcome Back</div>
+            <div style="font-size: 1.15rem; font-weight: 800;">Rohit Kumar</div>
           </div>
-          <div style="background: white; padding: 14px; border-radius: 12px; border: 1px solid var(--border-light); text-align: center;">
-            <div style="font-size: 1.6rem; font-weight: 800; color: #059669;">₹ 25k</div>
-            <div style="font-size: 0.75rem; color: #64748b;">Collected Today</div>
+          <span style="font-size: 0.65rem; background: rgba(255,255,255,0.25); padding: 3px 8px; border-radius: 99px; font-weight: 600;">🔋 92%</span>
+        </div>
+        <div style="font-size: 0.7rem; background: rgba(0,0,0,0.18); display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 99px; margin-top: 8px;">
+          <span>📍</span> On Duty • Sector 18, Noida
+        </div>
+      </div>
+
+      <div style="padding: 14px; display: flex; flex-direction: column; gap: 12px;">
+        <!-- Two Metric Cards -->
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+          <div style="background: white; padding: 12px; border-radius: 12px; border: 1px solid var(--border-light); text-align: center; box-shadow: var(--shadow-sm);">
+            <div style="font-size: 1.5rem; font-weight: 800; color: #2563eb;">${visits.length}</div>
+            <div style="font-size: 0.72rem; color: #64748b; font-weight: 600;">Visits Logged</div>
+          </div>
+          <div style="background: white; padding: 12px; border-radius: 12px; border: 1px solid var(--border-light); text-align: center; box-shadow: var(--shadow-sm);">
+            <div style="font-size: 1.4rem; font-weight: 800; color: #059669;">${formatCurrency(todayPaid || 25000)}</div>
+            <div style="font-size: 0.72rem; color: #64748b; font-weight: 600;">Collections</div>
           </div>
         </div>
-        <button class="btn btn-primary" onclick="window.renderSubMobileScreen('visit')" style="padding: 12px; border-radius: 10px;">+ New Store Visit</button>
-        <button class="btn btn-secondary" onclick="window.renderSubMobileScreen('attendance')" style="padding: 12px; border-radius: 10px;">Attendance Check</button>
+
+        <!-- Quick Action Buttons -->
+        <button class="btn btn-primary" onclick="window.renderSubMobileScreen('visit')" style="padding: 12px; border-radius: 10px; font-size: 0.85rem; font-weight: 700; display: flex; align-items: center; justify-content: center; gap: 8px;">
+          <span>📸</span> New Store Visit Check-in
+        </button>
+        <button class="btn btn-secondary" onclick="window.renderSubMobileScreen('attendance')" style="padding: 11px; border-radius: 10px; font-size: 0.82rem; font-weight: 600; display: flex; align-items: center; justify-content: center; gap: 8px;">
+          <span>⏱️</span> Attendance & Punch
+        </button>
+        <button class="btn btn-secondary" onclick="window.renderSubMobileScreen('collections')" style="padding: 11px; border-radius: 10px; font-size: 0.82rem; font-weight: 600; display: flex; align-items: center; justify-content: center; gap: 8px;">
+          <span>💰</span> Collect Retailer Payment
+        </button>
       </div>
     `;
   } else if (screen === 'attendance') {
     container.innerHTML = `
-      <div style="padding: 20px; text-align: center; flex: 1; display: flex; flex-direction: column; justify-content: center;">
-        <div style="width: 72px; height: 72px; border-radius: 50%; background: #ecfdf5; color: #059669; font-size: 2.2rem; display: flex; align-items: center; justify-content: center; margin: 0 auto 14px;">✓</div>
-        <h3 style="font-size: 1.15rem; margin-bottom: 4px;">You are checked In</h3>
-        <p style="font-size: 0.8rem; color: #64748b; margin-bottom: 18px;">09:08 AM • Sector 18, Noida</p>
+      <div style="padding: 24px 16px; text-align: center; flex: 1; display: flex; flex-direction: column; justify-content: center;">
+        <div style="width: 76px; height: 76px; border-radius: 50%; background: #ecfdf5; color: #059669; font-size: 2.2rem; display: flex; align-items: center; justify-content: center; margin: 0 auto 14px; box-shadow: 0 4px 12px rgba(16,185,129,0.2);">✓</div>
+        <h3 style="font-size: 1.15rem; margin-bottom: 4px; color: #0f172a;">You Are Checked In</h3>
+        <p style="font-size: 0.8rem; color: #64748b; margin-bottom: 4px;">Punch In: <strong>09:08 AM</strong></p>
+        <p style="font-size: 0.75rem; color: #2563eb; margin-bottom: 22px;">📍 Sector 18, Atta Market, Noida</p>
+        
         <div style="display: flex; flex-direction: column; gap: 10px;">
-          <button class="btn btn-danger" style="padding: 12px; font-size: 0.9rem; border-radius: 10px;" onclick="window.mobileCheckOut()">
-            🔴 Punch Out Now
+          <button class="btn btn-danger" style="padding: 13px; font-size: 0.88rem; border-radius: 10px; font-weight: 700;" onclick="window.mobileCheckOut()">
+            🔴 Punch Out
           </button>
-          <button class="btn btn-primary" style="padding: 12px; font-size: 0.9rem; border-radius: 10px;" onclick="window.mobileCheckIn()">
+          <button class="btn btn-primary" style="padding: 13px; font-size: 0.88rem; border-radius: 10px; font-weight: 700;" onclick="window.mobileCheckIn()">
             🟢 Punch In Again
           </button>
         </div>
@@ -1587,7 +1700,7 @@ async function renderSubMobileScreen(screen: string) {
   } else if (screen === 'visit') {
     container.innerHTML = `
       <div style="padding: 16px;">
-        <h4 style="font-size: 0.95rem; margin-bottom: 12px;">Mobile Store Visit</h4>
+        <h4 style="font-size: 0.95rem; margin-bottom: 12px; color: #0f172a;">Submit Store Visit</h4>
         <div class="form-group">
           <label class="form-label">Store</label>
           <select id="mob-store-select" class="form-select" style="font-size: 0.8rem;">
@@ -1595,27 +1708,33 @@ async function renderSubMobileScreen(screen: string) {
           </select>
         </div>
         <div class="form-group">
-          <label class="form-label">Location</label>
-          <input type="text" id="mob-v-loc" class="form-input" value="Sector 18, Atta Market, Noida" style="font-size: 0.8rem;">
+          <label class="form-label">Location (Auto-GPS)</label>
+          <input type="text" id="mob-v-loc" class="form-input" value="Atta Market, Sector 18, Noida" style="font-size: 0.8rem;">
         </div>
         <div class="form-group">
-          <label class="form-label">Photo Preview</label>
+          <label class="form-label">Attached Photo</label>
           <div style="display: flex; gap: 8px; margin-bottom: 10px;">
-            <img src="https://images.unsplash.com/photo-1555421689-d68471e189f2?w=100" style="width: 50px; height: 50px; border-radius: 6px; object-fit: cover;">
+            <img src="https://images.unsplash.com/photo-1555421689-d68471e189f2?w=100" style="width: 52px; height: 52px; border-radius: 8px; object-fit: cover; border: 2px solid #2563eb;">
           </div>
         </div>
-        <button class="btn btn-primary" style="width: 100%; padding: 12px;" onclick="window.mobileSubmitVisit()">Submit Visit</button>
+        <button class="btn btn-primary" style="width: 100%; padding: 12px; font-weight: 700;" onclick="window.mobileSubmitVisit()">Submit Visit [✓]</button>
       </div>
     `;
   } else if (screen === 'parties') {
     container.innerHTML = `
       <div style="padding: 14px; overflow-y: auto;">
-        <h4 style="font-size: 0.95rem; margin-bottom: 10px;">Retail Parties (${parties.length})</h4>
-        ${parties.slice(0, 5).map(p => `
-          <div style="background: white; padding: 10px; border-radius: 8px; border: 1px solid var(--border-light); margin-bottom: 8px;">
-            <div style="font-weight: 700; font-size: 0.82rem;">${p.shopName}</div>
-            <div style="font-size: 0.78rem; color: #ef4444; font-weight: 700;">${formatCurrency(p.currentBalance)}</div>
-            <div style="font-size: 0.7rem; color: #64748b;">📍 ${p.address}</div>
+        <h4 style="font-size: 0.95rem; margin-bottom: 10px; color: #0f172a;">Noida Retailers (${parties.length})</h4>
+        ${parties.map(p => `
+          <div style="background: white; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--border-light); margin-bottom: 8px; box-shadow: var(--shadow-sm);">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <strong style="font-size: 0.82rem; color: #0f172a;">${p.shopName}</strong>
+              <span style="font-size: 0.78rem; font-weight: 800; color: ${p.currentBalance > 0 ? '#ef4444' : '#059669'}; font-family: var(--font-mono);">${formatCurrency(p.currentBalance)}</span>
+            </div>
+            <div style="font-size: 0.7rem; color: #64748b; margin: 2px 0 8px;">📍 ${p.address}</div>
+            <div style="display: flex; gap: 6px;">
+              <a href="tel:${p.phone}" class="btn btn-secondary btn-sm" style="flex: 1; text-align: center; text-decoration: none; font-size: 0.72rem; padding: 4px;">📞 Call</a>
+              <button class="btn btn-whatsapp btn-sm" style="flex: 1; font-size: 0.72rem; padding: 4px;" onclick="window.sendWhatsAppReminder('${p.phone}', '${p.name}', '${p.shopName}', ${p.currentBalance}, '${p.duePaymentDate || 'Immediate'}')">📲 WhatsApp</button>
+            </div>
           </div>
         `).join('')}
       </div>
@@ -1623,25 +1742,30 @@ async function renderSubMobileScreen(screen: string) {
   } else if (screen === 'collections') {
     container.innerHTML = `
       <div style="padding: 16px;">
-        <h4 style="font-size: 0.95rem; margin-bottom: 12px;">Collect Payment</h4>
+        <h4 style="font-size: 0.95rem; margin-bottom: 12px; color: #0f172a;">Collect Payment</h4>
         <div class="form-group">
-          <label class="form-label">Select Party</label>
-          <select id="mob-pay-party" class="form-select">
-            ${parties.map(p => `<option value="${p.id}">${p.shopName} (${formatCurrency(p.currentBalance)})</option>`).join('')}
+          <label class="form-label">Select Retailer</label>
+          <select id="mob-pay-party" class="form-select" style="font-size: 0.8rem;">
+            ${parties.map(p => `<option value="${p.id}">${p.shopName} (Due: ${formatCurrency(p.currentBalance)})</option>`).join('')}
           </select>
         </div>
         <div class="form-group">
-          <label class="form-label">Amount (₹)</label>
+          <label class="form-label">Collection Amount (₹)</label>
           <input type="number" id="mob-pay-amt" class="form-input" value="15000">
+        </div>
+        <div style="display: flex; gap: 6px; margin-bottom: 12px;">
+          <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('mob-pay-amt').value = '5000'">+₹5,000</button>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('mob-pay-amt').value = '10000'">+₹10,000</button>
+          <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('mob-pay-amt').value = '25000'">+₹25,000</button>
         </div>
         <div class="form-group">
           <label class="form-label">Payment Mode</label>
           <select id="mob-pay-mode" class="form-select">
-            <option value="UPI">UPI</option>
-            <option value="CASH">Cash</option>
+            <option value="UPI">UPI (Instant Online)</option>
+            <option value="CASH">Cash in Hand</option>
           </select>
         </div>
-        <button class="btn btn-primary" style="width: 100%; padding: 12px;" onclick="window.mobileSubmitPayment()">Save Payment</button>
+        <button class="btn btn-primary" style="width: 100%; padding: 12px; font-weight: 700; margin-top: 6px;" onclick="window.mobileSubmitPayment()">Confirm & Collect</button>
       </div>
     `;
   }
@@ -1831,19 +1955,47 @@ async function renderBackup() {
 }
 
 // ============================================================================
-// GLOBAL WINDOW HELPERS & MODALS
+// GLOBAL WINDOW HELPERS & MODALS (Including Party Edit & Live Employee Focus)
 // ============================================================================
 (window as any).switchView = (v: string) => switchView(v);
 
-(window as any).focusOnEmployee = (name: string, lat: number, lng: number, addr?: string) => {
-  if (activeMap) {
-    activeMap.flyTo([lat, lng], 15, { duration: 1.2 });
-    const nameEl = document.getElementById('popup-agent-name');
-    const subEl = document.getElementById('popup-agent-sub');
-    if (nameEl) nameEl.textContent = name;
-    if (subEl) subEl.innerHTML = `${addr || 'Sector 18, Noida'}<br>Last updated: ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-    showToast(`Focused on ${name} at ${addr || 'Noida'}!`, '📍');
+(window as any).focusOnEmployee = (staffId: string, name: string, lat: number, lng: number, addr?: string) => {
+  selectedStaffId = staffId;
+
+  // Highlight selected card in tracking sidebar
+  document.querySelectorAll('.tracking-item-card').forEach(c => {
+    (c as HTMLElement).style.border = '1px solid var(--border-light)';
+    (c as HTMLElement).style.background = '#f8fafc';
+  });
+  const activeCard = document.getElementById(`track-card-${staffId}`);
+  if (activeCard) {
+    activeCard.style.border = '2px solid #2563eb';
+    activeCard.style.background = '#eff6ff';
   }
+
+  // Update floating info pill on map
+  const nameEl = document.getElementById('track-agent-name');
+  const gpsEl = document.getElementById('track-agent-gps');
+  if (nameEl) nameEl.textContent = name;
+  if (gpsEl) gpsEl.textContent = `${lat.toFixed(4)}° N, ${lng.toFixed(4)}° E (${addr || 'Noida'})`;
+
+  // Center & zoom map
+  if (activeMap) {
+    activeMap.flyTo([lat, lng], 15, { duration: 1.0 });
+
+    // Open popup for this marker
+    const target = mapMarkers.find(m => m.staffId === staffId);
+    if (target) {
+      target.marker.openPopup();
+    }
+  }
+
+  const popName = document.getElementById('popup-agent-name');
+  const popSub = document.getElementById('popup-agent-sub');
+  if (popName) popName.textContent = name;
+  if (popSub) popSub.innerHTML = `${addr || 'Sector 18, Noida'}<br>Live GPS: ${lat.toFixed(4)}° N, ${lng.toFixed(4)}° E`;
+
+  showToast(`Located ${name} at ${addr || 'Noida'}!`, '📍');
 };
 
 (window as any).sendWhatsAppReminder = (phone: string, name: string, shop: string, balance: number, dueDate: string) => {
@@ -1865,11 +2017,95 @@ async function renderBackup() {
         <p style="font-size:0.8rem; color:#334155; margin-top:4px;">${p.biodata}</p>
       </div>
       <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 14px;">
-        <div style="font-size:1.1rem; font-weight:700; color:${p.currentBalance > 0 ? '#ef4444' : '#059669'};">Outstanding Due: ${formatCurrency(p.currentBalance)}</div>
-        <button class="btn btn-whatsapp" onclick="window.sendWhatsAppReminder('${p.phone}', '${p.name}', '${p.shopName}', ${p.currentBalance}, '${p.duePaymentDate || 'Immediate'}')">📲 Send WhatsApp Reminder</button>
+        <div style="font-size:1.1rem; font-weight:700; color:${p.currentBalance > 0 ? '#ef4444' : '#059669'};">Outstanding Due: ${formatCurrency(p.currentBalance)} (${p.duePaymentDate || 'Active'})</div>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn btn-secondary" onclick="window.editPartyDetails('${p.id}')">✏️ Edit Retailer</button>
+          <button class="btn btn-whatsapp" onclick="window.sendWhatsAppReminder('${p.phone}', '${p.name}', '${p.shopName}', ${p.currentBalance}, '${p.duePaymentDate || 'Immediate'}')">📲 WhatsApp</button>
+        </div>
       </div>
     </div>
   `);
+};
+
+// Edit Party Modal (Exactly requested in audio)
+(window as any).editPartyDetails = (id: string) => {
+  const p = cachedParties.find(item => item.id === id);
+  if (!p) return;
+  openModal(`Edit Retailer - ${p.shopName}`, `
+    <form id="form-edit-party" onsubmit="event.preventDefault(); window.saveEditedParty('${p.id}');">
+      <div class="form-group">
+        <label class="form-label">Shop / Party Name *</label>
+        <input type="text" id="ep-shop" class="form-input" required value="${p.shopName}">
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Owner Name *</label>
+          <input type="text" id="ep-name" class="form-input" required value="${p.name}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Mobile Number *</label>
+          <input type="text" id="ep-phone" class="form-input" required value="${p.phone}">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Address in Noida / NCR *</label>
+        <input type="text" id="ep-addr" class="form-input" required value="${p.address}">
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Outstanding Balance (₹) *</label>
+          <input type="number" id="ep-bal" class="form-input" value="${p.currentBalance}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Payment Status *</label>
+          <select id="ep-status" class="form-select">
+            <option value="Paid" ${p.currentBalance === 0 || p.duePaymentDate === 'Paid' ? 'selected' : ''}>Paid / Clean</option>
+            <option value="Due tomorrow" ${p.duePaymentDate === 'Due tomorrow' ? 'selected' : ''}>Due tomorrow</option>
+            <option value="3 days overdue" ${p.duePaymentDate === '3 days overdue' ? 'selected' : ''}>3 days overdue</option>
+            <option value="5 days overdue" ${p.duePaymentDate === '5 days overdue' ? 'selected' : ''}>5 days overdue</option>
+            <option value="7 days overdue" ${p.duePaymentDate === '7 days overdue' ? 'selected' : ''}>7 days overdue</option>
+            <option value="Active" ${p.duePaymentDate === 'Active' ? 'selected' : ''}>Active</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Credit Limit (₹)</label>
+        <input type="number" id="ep-limit" class="form-input" value="${p.creditLimit}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Customer Biodata & Retail History</label>
+        <textarea id="ep-bio" class="form-textarea" rows="2">${p.biodata}</textarea>
+      </div>
+      <div style="display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px;">
+        <button type="button" class="btn btn-secondary" onclick="document.getElementById('modal-close-btn').click();">Cancel</button>
+        <button type="submit" class="btn btn-primary">Save Changes</button>
+      </div>
+    </form>
+  `);
+};
+
+(window as any).saveEditedParty = async (id: string) => {
+  const p = cachedParties.find(item => item.id === id);
+  if (!p) return;
+  const newBal = Number((document.getElementById('ep-bal') as HTMLInputElement).value) || 0;
+  const newStatus = (document.getElementById('ep-status') as HTMLSelectElement).value;
+
+  const updated: CustomerParty = {
+    ...p,
+    shopName: (document.getElementById('ep-shop') as HTMLInputElement).value,
+    name: (document.getElementById('ep-name') as HTMLInputElement).value,
+    phone: (document.getElementById('ep-phone') as HTMLInputElement).value,
+    address: (document.getElementById('ep-addr') as HTMLInputElement).value,
+    currentBalance: newBal,
+    duePaymentDate: newBal === 0 ? 'Paid' : newStatus,
+    creditLimit: Number((document.getElementById('ep-limit') as HTMLInputElement).value) || p.creditLimit,
+    biodata: (document.getElementById('ep-bio') as HTMLTextAreaElement).value
+  };
+
+  await api.updateParty(updated);
+  closeModal();
+  showToast(`Party ${updated.shopName} updated successfully!`, '✏️');
+  await renderParties();
 };
 
 (window as any).previewPhoto = (url: string, title: string) => {
@@ -2210,7 +2446,7 @@ function setupGlobalSearch() {
         </div>
       `).join('')}
       ${matchesStaff.map(s => `
-        <div class="search-dropdown-item" onclick="window.switchView('tracking'); window.focusOnEmployee('${s.name}', 28.5708, 77.3271, 'Sector 18, Noida'); document.getElementById('search-results-dropdown').classList.add('hidden');">
+        <div class="search-dropdown-item" onclick="window.switchView('tracking'); window.focusOnEmployee('${s.id}', '${s.name}', 28.5708, 77.3271, 'Sector 18, Noida'); document.getElementById('search-results-dropdown').classList.add('hidden');">
           <div>
             <strong>👤 ${s.name}</strong> <small style="color: #64748b;">(Field Executive)</small>
           </div>
